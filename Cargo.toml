@@ -1,0 +1,14 @@
+[package]
+name = "rply-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "_core_rs"
+crate-type = ["cdylib", "rlib"]
+path = "rust/src/lib.rs"
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["extension-module"] }
+regex = "1.11"

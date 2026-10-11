@@ -1,0 +1,36 @@
+# Rust and wheel build output
+/target/
+/build/
+/dist/
+
+# Python binaries, caches, and package metadata
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.dylib
+*.pdb
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local Python environments and configuration
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Independently cloned upstream reference repositories
+/upstream/ply/
+/upstream/sly/
+
+# Editor and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
