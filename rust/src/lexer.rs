@@ -1,7 +1,7 @@
 use pyo3::class::gc::{PyTraverseError, PyVisit};
 use pyo3::prelude::*;
 use pyo3::types::PyAnyMethods;
-use regex::{Regex, RegexBuilder};
+use regex_automata::{meta::Regex, util::syntax, Anchored, Input};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
@@ -123,6 +123,8 @@ pub struct PyLexerEngine {
     state_stack: RefCell<Vec<String>>,
     literals: RefCell<HashSet<char>>,
     callback_owner: RefCell<Option<Py<PyAny>>>,
+    stop_requested: Cell<bool>,
+    input_revision: Cell<usize>,
 }
 
 #[pymethods]
@@ -177,6 +179,8 @@ impl PyLexerEngine {
             state_stack: RefCell::new(Vec::new()),
             literals: RefCell::new(HashSet::new()),
             callback_owner: RefCell::new(None),
+            stop_requested: Cell::new(false),
+            input_revision: Cell::new(0),
         }
     }
 
@@ -211,8 +215,32 @@ impl PyLexerEngine {
     }
 
     #[getter]
+    fn input_revision(&self) -> usize {
+        self.input_revision.get()
+    }
+
+    #[getter]
     fn current_state(&self) -> String {
         self.current_state.borrow().clone()
+    }
+
+    #[getter]
+    fn state_stack(&self) -> Vec<String> {
+        self.state_stack.borrow().clone()
+    }
+
+    #[setter]
+    fn set_state_stack(&self, states: Vec<String>) -> PyResult<()> {
+        if states
+            .iter()
+            .any(|state| !self.states.borrow().contains_key(state))
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Undefined lexer state in stack",
+            ));
+        }
+        *self.state_stack.borrow_mut() = states;
+        Ok(())
     }
 
     #[getter]
@@ -229,6 +257,16 @@ impl PyLexerEngine {
         *self.callback_owner.borrow_mut() = Some(lexer);
     }
 
+    #[getter]
+    fn stop_requested(&self) -> bool {
+        self.stop_requested.get()
+    }
+
+    #[setter]
+    fn set_stop_requested(&self, value: bool) {
+        self.stop_requested.set(value);
+    }
+
     #[pyo3(signature = (name, kind="inclusive"))]
     fn add_state(&self, name: &str, kind: &str) -> PyResult<()> {
         if kind != "inclusive" && kind != "exclusive" {
@@ -240,6 +278,7 @@ impl PyLexerEngine {
         self.states
             .borrow_mut()
             .entry(name.to_string())
+            .and_modify(|state| state.kind = kind.to_string())
             .or_insert_with(|| StateConfig {
                 kind: kind.to_string(),
                 rules: Vec::new(),
@@ -268,27 +307,31 @@ impl PyLexerEngine {
                 flags
             )));
         }
-        if !self.states.borrow().contains_key(state) {
-            self.add_state(state, "inclusive")?;
-        }
-
-        let anchored = if flags & 64 != 0 {
-            format!("\\A(?:{}\n)", pattern) // A trailing verbose comment must not hide ')'.
+        let wrapped = if flags & 64 != 0 {
+            format!("(?:{}\n)", pattern) // A trailing verbose comment must not hide ')'.
         } else {
-            format!("\\A(?:{})", pattern)
+            format!("(?:{})", pattern)
         };
-        let regex = RegexBuilder::new(&anchored)
-            .case_insensitive(flags & 2 != 0)
-            .multi_line(flags & 8 != 0)
-            .dot_matches_new_line(flags & 16 != 0)
-            .ignore_whitespace(flags & 64 != 0)
-            .build()
+        let regex = Regex::builder()
+            .syntax(
+                syntax::Config::new()
+                    .case_insensitive(flags & 2 != 0)
+                    .multi_line(flags & 8 != 0)
+                    .dot_matches_new_line(flags & 16 != 0)
+                    .ignore_whitespace(flags & 64 != 0),
+            )
+            .build(&wrapped)
             .map_err(|e| {
                 pyo3::exceptions::PyValueError::new_err(format!(
                     "Failed to compile regex {:?} for token {:?}: {}",
                     pattern, name, e
                 ))
             })?;
+
+        // Compiling a rejected rule must not leave an empty state behind.
+        if !self.states.borrow().contains_key(state) {
+            self.add_state(state, "inclusive")?;
+        }
 
         let rule = CompiledRule {
             name: name.to_string(),
@@ -300,6 +343,8 @@ impl PyLexerEngine {
 
         if let Some(st) = self.states.borrow_mut().get_mut(state) {
             st.rules.push(rule);
+            st.rules
+                .sort_by_key(|rule| std::cmp::Reverse(rule.priority));
         }
         Ok(())
     }
@@ -314,12 +359,13 @@ impl PyLexerEngine {
         Ok(())
     }
 
-    fn set_error_func(&self, state: &str, func: Py<PyAny>) -> PyResult<()> {
+    #[pyo3(signature = (state, func))]
+    fn set_error_func(&self, state: &str, func: Option<Py<PyAny>>) -> PyResult<()> {
         if !self.states.borrow().contains_key(state) {
             self.add_state(state, "inclusive")?;
         }
         if let Some(st) = self.states.borrow_mut().get_mut(state) {
-            st.error_func = Some(func);
+            st.error_func = func;
         }
         Ok(())
     }
@@ -343,6 +389,7 @@ impl PyLexerEngine {
     }
 
     fn input(&self, text: String) {
+        self.stop_requested.set(false);
         let is_ascii = text.is_ascii();
         self.is_ascii.set(is_ascii);
         if !is_ascii {
@@ -357,6 +404,34 @@ impl PyLexerEngine {
         self.lineno.set(1);
         *self.current_state.borrow_mut() = "INITIAL".to_string();
         self.state_stack.borrow_mut().clear();
+        self.input_revision
+            .set(self.input_revision.get().wrapping_add(1));
+    }
+
+    fn restore_state(
+        &self,
+        data: String,
+        pos: usize,
+        lineno: usize,
+        current_state: &str,
+        state_stack: Vec<String>,
+    ) -> PyResult<()> {
+        // PyO3 converts every argument before entry; validate names before input().
+        let states = self.states.borrow();
+        if !states.contains_key(current_state)
+            || state_stack.iter().any(|state| !states.contains_key(state))
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Snapshot contains an undefined lexer state",
+            ));
+        }
+        drop(states);
+        self.input(data);
+        self.pos.set(pos);
+        self.lineno.set(lineno);
+        *self.current_state.borrow_mut() = current_state.to_string();
+        *self.state_stack.borrow_mut() = state_stack;
+        Ok(())
     }
 
     fn begin(&self, state: &str) -> PyResult<()> {
@@ -395,16 +470,18 @@ impl PyLexerEngine {
     fn token(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let lex_err_cls = py.import("rply.core.lexer_engine")?.getattr("LexError")?;
 
-        let data_ref = self.data.borrow();
-        let total_chars = self.length.get();
-        let is_ascii = self.is_ascii.get();
-        let char_indices_borrow = if !is_ascii {
-            Some(self.char_indices.borrow())
-        } else {
-            None
-        };
-
-        while self.pos.get() < total_chars {
+        loop {
+            let data_ref = self.data.borrow();
+            let total_chars = self.length.get();
+            if self.pos.get() >= total_chars {
+                break;
+            }
+            let is_ascii = self.is_ascii.get();
+            let char_indices_borrow = if !is_ascii {
+                Some(self.char_indices.borrow())
+            } else {
+                None
+            };
             let curr_state = self.current_state.borrow().clone();
             let states_borrow = self.states.borrow();
             let state_cfg = match states_borrow.get(&curr_state) {
@@ -454,7 +531,10 @@ impl PyLexerEngine {
             } else {
                 char_indices_borrow.as_ref().unwrap()[pos_now].0
             };
-            let slice = &data_ref[byte_start..];
+            // Anchor at the scan offset while retaining context for ^ and \b.
+            let input = Input::new(data_ref.as_bytes())
+                .range(byte_start..)
+                .anchored(Anchored::Yes);
 
             // Match active rules
             let states_b = self.states.borrow();
@@ -464,37 +544,37 @@ impl PyLexerEngine {
             let mut matched_rule: Option<(String, usize, usize)> = None; // (name, match_len, rule_idx in state)
             let mut matched_in_initial = false;
 
-            if is_inclusive {
-                if let Some(init_st) = states_b.get("INITIAL") {
-                    for (idx, rule) in init_st.rules.iter().enumerate() {
-                        if let Some(mat) = rule.regex.find(slice) {
-                            let match_len = if is_ascii {
-                                mat.as_str().len()
-                            } else {
-                                mat.as_str().chars().count()
-                            };
-                            matched_rule = Some((rule.name.clone(), match_len, idx));
-                            matched_in_initial = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if matched_rule.is_none() {
-                if let Some(st) = states_b.get(&curr_state) {
-                    for (idx, rule) in st.rules.iter().enumerate() {
-                        if let Some(mat) = rule.regex.find(slice) {
-                            let match_len = if is_ascii {
-                                mat.as_str().len()
-                            } else {
-                                mat.as_str().chars().count()
-                            };
-                            matched_rule = Some((rule.name.clone(), match_len, idx));
-                            matched_in_initial = false;
-                            break;
-                        }
-                    }
+            let initial_rules = if is_inclusive {
+                &states_b["INITIAL"].rules[..]
+            } else {
+                &[]
+            };
+            let local_rules = &state_cfg.rules;
+            let (mut initial_idx, mut local_idx) = (0, 0);
+            // Merge the sorted lists without allocating on each scanned token.
+            // INITIAL precedes local rules when priorities are equal.
+            while initial_idx < initial_rules.len() || local_idx < local_rules.len() {
+                let from_initial = initial_idx < initial_rules.len()
+                    && (local_idx == local_rules.len()
+                        || initial_rules[initial_idx].priority >= local_rules[local_idx].priority);
+                let (idx, rule) = if from_initial {
+                    let idx = initial_idx;
+                    initial_idx += 1;
+                    (idx, &initial_rules[idx])
+                } else {
+                    let idx = local_idx;
+                    local_idx += 1;
+                    (idx, &local_rules[idx])
+                };
+                if let Some(mat) = rule.regex.find(input.clone()) {
+                    let match_len = if is_ascii {
+                        mat.len()
+                    } else {
+                        data_ref[mat.range()].chars().count()
+                    };
+                    matched_rule = Some((rule.name.clone(), match_len, idx));
+                    matched_in_initial = from_initial;
+                    break;
                 }
             }
 
@@ -558,8 +638,15 @@ impl PyLexerEngine {
                 drop(states_b);
 
                 if let Some(func) = func_opt {
+                    // User callbacks may replace input, including Unicode indexes.
+                    drop(char_indices_borrow);
+                    drop(data_ref);
                     let res = func.call1(py, (&py_tok,))?;
                     if res.is_none(py) {
+                        // A configuration fallback may retire us inside an action.
+                        if self.stop_requested.get() {
+                            return Ok(None);
+                        }
                         continue;
                     }
                     return Ok(Some(res));
@@ -620,11 +707,36 @@ impl PyLexerEngine {
                     lexer: py_lexer_ref,
                 };
                 let py_err_tok = Py::new(py, err_tok)?;
+                let input_revision = self.input_revision.get();
+                drop(char_indices_borrow);
+                drop(data_ref);
                 let res = err_func.call1(py, (py_err_tok,))?;
                 if !res.is_none(py) {
                     return Ok(Some(res));
                 }
-                if self.pos.get() == pos_now {
+                if self.stop_requested.get() {
+                    // Finish error progress on the new runtime, without replaying
+                    // the handler or overwriting edits made after the handoff.
+                    let owner = self
+                        .callback_owner
+                        .borrow()
+                        .as_ref()
+                        .map(|l| l.clone_ref(py));
+                    if let Some(owner) = owner {
+                        let owner = owner.bind(py);
+                        if owner.getattr("_input_revision")?.extract::<usize>()? == input_revision
+                            && owner.getattr("pos")?.extract::<usize>()? == pos_now
+                        {
+                            owner.call_method1("skip", (1,))?;
+                        }
+                    } else if self.input_revision.get() == input_revision
+                        && self.pos.get() == pos_now
+                    {
+                        self.pos.set(pos_now + 1);
+                    }
+                    return Ok(None);
+                }
+                if self.input_revision.get() == input_revision && self.pos.get() == pos_now {
                     self.pos.set(pos_now + 1);
                 }
                 continue;

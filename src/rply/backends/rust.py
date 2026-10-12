@@ -1,39 +1,52 @@
 """Adapters between Python grammar objects and the native extension."""
 
 from typing import Dict, List, Tuple
-from rply.backends import native_core
 from rply.core.conflicts import ConflictRecord
+from rply.core.table_data import ParseTableData, TableBuildResult
 
 
-def build_table(table) -> None:
-    """Populate a public table from the native grammar representation."""
-    rs_g = native_core.Grammar(list(table.grammar.Terminals))
-    if table.grammar.Precedence:
+class RustTableArtifact:
+    """Own the native table and snapshots used to validate shared runtime rows."""
+
+    def __init__(self, module, native_table, data):
+        self.module = module
+        self.native_table = native_table
+        self.action_snapshot = {state: row.copy() for state, row in data.action.items()}
+        self.goto_snapshot = {state: row.copy() for state, row in data.goto.items()}
+
+    def create_parser(self, data, metadata):
+        if (data.num_states == self.native_table.num_states
+                and data.action == self.action_snapshot and data.goto == self.goto_snapshot):
+            return self.module.LRParserEngine.from_table(self.native_table, *metadata)
+        return self.module.LRParserEngine(data.num_states, data.action, data.goto, *metadata)
+
+
+def build_table(grammar, module) -> TableBuildResult:
+    """Return native build results without mutating a public table object."""
+    rs_g = module.Grammar(list(grammar.Terminals))
+    if grammar.Precedence:
         level_map: Dict[int, Tuple[str, List[str]]] = {}
-        for tok, (assoc, lvl) in table.grammar.Precedence.items():
+        for tok, (assoc, lvl) in grammar.Precedence.items():
             if lvl not in level_map:
                 level_map[lvl] = (assoc, [])
             level_map[lvl][1].append(tok)
         prec_specs = [level_map[lvl] for lvl in sorted(level_map.keys())]
         rs_g.set_precedence(prec_specs)
 
-    for p in table.grammar.Productions[1:]:  # skip augmented rule S' -> start
+    for p in grammar.Productions[1:]:  # skip augmented rule S' -> start
         prec_val = p.prec if p.prec != ("right", 0) else None
         rs_g.add_production(p.name, list(p.prod), p.line, None, prec_val)
 
-    rs_g.set_start(table.grammar.start)
+    rs_g.set_start(grammar.start)
     rs_table = rs_g.build_table()
 
-    table.action = rs_table.action
-    table.goto = rs_table.goto
-    table.sr_conflicts = rs_table.sr_conflicts
-    table.rr_conflicts = []
+    rr_conflicts = []
     for st, c1, c2 in rs_table.rr_conflicts:
-        table.rr_conflicts.append((st, table.productions[c1], table.productions[c2]))
+        rr_conflicts.append((st, grammar.Productions[c1], grammar.Productions[c2]))
 
-    table.conflicts = []
+    conflicts = []
     for c in rs_table.conflicts:
-        table.conflicts.append(
+        conflicts.append(
             ConflictRecord(
                 kind=c["kind"],
                 state=int(c["state"]),
@@ -44,9 +57,8 @@ def build_table(table) -> None:
             )
         )
 
-    table.states = [[] for _ in range(rs_table.num_states)]
-    # Keep the native runtime table for subsequent parser instances. Snapshots
-    # detect edits to the public dictionaries before opting into shared storage.
-    table._rs_table = rs_table
-    table._native_action_snapshot = {state: row.copy() for state, row in table.action.items()}
-    table._native_goto_snapshot = {state: row.copy() for state, row in table.goto.items()}
+    data = ParseTableData(
+        rs_table.action, rs_table.goto, grammar.Productions,
+        [[] for _ in range(rs_table.num_states)], conflicts, rs_table.sr_conflicts, rr_conflicts,
+    )
+    return TableBuildResult(data, RustTableArtifact(module, rs_table, data))

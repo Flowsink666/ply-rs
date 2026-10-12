@@ -1,109 +1,214 @@
-"""Public lexer interface with optional native acceleration."""
+"""Public lexer facade with configuration and one selected runtime."""
 
-from typing import Any, Callable, Optional, Sequence, Union
+from collections.abc import MutableSequence
+from typing import Any, Callable, Iterator, Optional, Sequence, Union
 
 from rply.backends import HAS_RUST_CORE, fallback, native_core
+from rply.backends.interfaces import LexerRuntime
 from rply.backends.python.lexer import PythonLexerEngine
+from rply.backends.rust_lexer import RustLexerRuntime
+from rply.core.lexer_config import LexerConfig, LexerSnapshot, lexer_counter
 from rply.core.tokens import LexError, LexRule, Token
 
 
-class LexerEngine(PythonLexerEngine):
-    """Keep shared rule definitions while dispatching to one runtime backend."""
+class _StateStackView(MutableSequence):
+    """A compatibility view that never stores a second copy of runtime state."""
 
+    def __init__(self, lexer):
+        self.lexer = lexer
+
+    def __len__(self):
+        return len(self.lexer._runtime.state_stack)
+
+    def __getitem__(self, index):
+        return self.lexer._runtime.state_stack[index]
+
+    def __iter__(self):
+        return iter(self.lexer._runtime.state_stack)
+
+    def copy(self):
+        return list(self.lexer._runtime.state_stack)
+
+    def __setitem__(self, index, value):
+        stack = list(self.lexer._runtime.state_stack)
+        stack[index] = value
+        self.lexer.state_stack = stack
+
+    def __delitem__(self, index):
+        stack = list(self.lexer._runtime.state_stack)
+        del stack[index]
+        self.lexer.state_stack = stack
+
+    def insert(self, index, value):
+        stack = list(self.lexer._runtime.state_stack)
+        stack.insert(index, value)
+        self.lexer.state_stack = stack
+
+    def __eq__(self, other):
+        return list(self.lexer._runtime.state_stack) == other
+
+    def __repr__(self):
+        return repr(list(self.lexer._runtime.state_stack))
+
+
+class LexerEngine:
     def __init__(self):
-        self._rs_engine = None
+        self._config = LexerConfig()
+        self._runtime: LexerRuntime
         self.backend = "python"
-        super().__init__()
         if HAS_RUST_CORE:
             try:
-                engine = native_core.LexerEngine()
-                engine.callback_owner = self
+                self._runtime = RustLexerRuntime(native_core, self)
             except Exception as error:
                 fallback("lexer", error)
             else:
-                self._rs_engine = engine
                 self.backend = "rust"
+                return
+        self._runtime = PythonLexerEngine(self._config, callback_owner=self)
 
     @property
-    def pos(self) -> int:
-        return self._rs_engine.pos if self._rs_engine is not None else self._pos
+    def states(self):
+        return self._config.states
+
+    @property
+    def rules(self):
+        return self._config.rules
+
+    @property
+    def ignore(self):
+        return self._config.ignore
+
+    @property
+    def error_funcs(self):
+        return self._config.error_funcs
+
+    @property
+    def literals(self):
+        return self._config.literals
+
+    @property
+    def data(self):
+        return self._runtime.data
+
+    @property
+    def length(self):
+        return self._runtime.length
+
+    @property
+    def pos(self):
+        return self._runtime.pos
 
     @pos.setter
-    def pos(self, value: int) -> None:
-        self._pos = value
-        if self._rs_engine is not None:
-            self._rs_engine.pos = value
+    def pos(self, value):
+        self._runtime.pos = lexer_counter(value, "position")
 
     @property
-    def lineno(self) -> int:
-        return self._rs_engine.lineno if self._rs_engine is not None else self._lineno
+    def lineno(self):
+        return self._runtime.lineno
 
     @lineno.setter
-    def lineno(self, value: int) -> None:
-        self._lineno = value
-        if self._rs_engine is not None:
-            self._rs_engine.lineno = value
+    def lineno(self, value):
+        self._runtime.lineno = lexer_counter(value, "line number")
 
     @property
-    def current_state(self) -> str:
-        return (
-            self._rs_engine.current_state
-            if self._rs_engine is not None
-            else self._current_state
-        )
+    def _input_revision(self):
+        return self._runtime.input_revision
+
+    @property
+    def current_state(self):
+        return self._runtime.current_state
 
     @current_state.setter
-    def current_state(self, value: str) -> None:
-        self._current_state = value
+    def current_state(self, value):
+        self.begin(value)
 
-    def _configure_native(self, method: str, *args: Any) -> None:
-        if self._rs_engine is None:
+    @property
+    def state_stack(self):
+        return _StateStackView(self)
+
+    @state_stack.setter
+    def state_stack(self, value):
+        states = list(value)
+        if any(state not in self.states for state in states):
+            raise ValueError("Undefined lexer state in stack")
+        self._runtime.state_stack = states
+
+    def capture_state(self) -> LexerSnapshot:
+        return LexerSnapshot(self.data, self.pos, self.lineno, self.current_state,
+                             tuple(self._runtime.state_stack))
+
+    def restore_state(self, state: LexerSnapshot) -> None:
+        self._runtime.restore_state(state.validated(self.states))
+
+    def _configure(self, method: str, *args: Any) -> None:
+        change = self._config.prepare(method, *args)
+        if self.backend != "rust":
+            self._config.apply(change)
             return
         try:
-            getattr(self._rs_engine, method)(*args)
+            self._runtime.configure(method, *change.args)
         except Exception as error:
             fallback("lexer", error)
-            self._pos = self.pos
-            self._lineno = self.lineno
-            self._current_state = self.current_state
-            self._rs_engine = None
+            previous_runtime = self._runtime
+            state = self.capture_state()
+            replacement = PythonLexerEngine(self._config, callback_owner=self)
+            replacement.restore_state(state)
+            # Moving the same input to another runtime is not a new input.
+            replacement.input_revision = previous_runtime.input_revision
+            self._config.apply(change)
+            self._runtime = replacement
             self.backend = "python"
+            previous_runtime.retire()
+        else:
+            self._config.apply(change)
 
     def add_state(self, name: str, kind: str = "inclusive") -> None:
-        super().add_state(name, kind)
-        self._configure_native("add_state", name, kind)
+        self._configure("add_state", name, kind)
 
-    def add_rule(
-        self, state: str, name: str, pattern: str,
-        func: Optional[Callable[..., Any]] = None,
-        priority: int = 0, flags: int = 0,
-    ) -> None:
-        super().add_rule(state, name, pattern, func, priority, flags)
-        self._configure_native("add_rule", state, name, pattern, func, priority, flags)
+    def add_rule(self, state: str, name: str, pattern: str, func: Optional[Callable] = None,
+                 priority: int = 0, flags: int = 0) -> None:
+        self._configure("add_rule", state, name, pattern, func, priority, flags)
 
     def set_ignore(self, state: str, chars_or_regex: str) -> None:
-        super().set_ignore(state, chars_or_regex)
-        self._configure_native("set_ignore", state, chars_or_regex)
+        self._configure("set_ignore", state, chars_or_regex)
 
-    def set_error_func(self, state: str, func: Callable[..., Any]) -> None:
-        super().set_error_func(state, func)
-        self._configure_native("set_error_func", state, func)
+    def set_error_func(self, state: str, func: Callable) -> None:
+        self._configure("set_error_func", state, func)
 
     def set_literals(self, lits: Union[str, Sequence[str]]) -> None:
-        super().set_literals(lits)
-        self._configure_native("set_literals", lits)
+        self._configure("set_literals", tuple(lits))
 
     def input(self, text: str) -> None:
-        super().input(text)
-        if self._rs_engine is not None:
-            self._rs_engine.input(text)
+        if not isinstance(text, str):
+            raise TypeError("Input must be a string")
+        self._runtime.input(text)
 
     def begin(self, state: str) -> None:
-        super().begin(state)
-        if self._rs_engine is not None:
-            self._rs_engine.begin(state)
+        self._runtime.begin(state)
+
+    def push_state(self, state: str) -> None:
+        if state not in self.states:
+            raise ValueError(f"Undefined lexer state {state!r}")
+        self._runtime.push_state(state)
+
+    def pop_state(self) -> None:
+        self._runtime.pop_state()
+
+    def skip(self, n: int = 1) -> None:
+        self.pos += n
 
     def token(self) -> Optional[Token]:
-        if self._rs_engine is not None:
-            return self._rs_engine.token()
-        return super().token()
+        while True:
+            runtime = self._runtime
+            token = runtime.token()
+            if token is not None or self._runtime is runtime:
+                return token
+
+    def tokenize(self, text: Optional[str] = None) -> Iterator[Token]:
+        if text is not None:
+            self.input(text)
+        while True:
+            tok = self.token()
+            if tok is None:
+                return
+            yield tok

@@ -82,6 +82,27 @@ pub struct ParserTables {
     pub goto: Vec<HashMap<String, usize>>,
 }
 
+/// A live stack view for proxy actions. Symbols are converted only on access,
+/// so deeply nested inputs do not copy the entire stack on every reduction.
+#[pyclass]
+struct ParserStack {
+    symbols: Vec<PyParsedSymbol>,
+}
+
+#[pymethods]
+impl ParserStack {
+    fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<PyParsedSymbol> {
+        let len = self.symbols.len() as isize;
+        let index = if index < 0 { len + index } else { index };
+        if index < 0 || index >= len {
+            return Err(pyo3::exceptions::PyIndexError::new_err(
+                "parser stack index out of range",
+            ));
+        }
+        Ok(self.symbols[index as usize].clone_symbol(py))
+    }
+}
+
 impl ParserTables {
     pub fn new(
         num_states: usize,
@@ -161,7 +182,26 @@ impl LRParserEngine {
         }
     }
 
-    #[pyo3(signature = (token_stream, reduce_cb, error_cb=None, value_funcs=None))]
+    #[staticmethod]
+    #[pyo3(signature = (engine, prod_names, prod_lens, has_custom_func, value_actions=None))]
+    fn from_engine(
+        engine: PyRef<'_, Self>,
+        prod_names: Vec<String>,
+        prod_lens: Vec<usize>,
+        has_custom_func: Vec<bool>,
+        value_actions: Option<Vec<bool>>,
+    ) -> Self {
+        let value_actions = value_actions.unwrap_or_else(|| vec![false; prod_names.len()]);
+        Self {
+            tables: Arc::clone(&engine.tables),
+            prod_names,
+            prod_lens,
+            has_custom_func,
+            value_actions,
+        }
+    }
+
+    #[pyo3(signature = (token_stream, reduce_cb, error_cb=None, value_funcs=None, with_stack=false))]
     fn parse(
         &self,
         py: Python<'_>,
@@ -169,6 +209,7 @@ impl LRParserEngine {
         reduce_cb: &Bound<'_, PyAny>,
         error_cb: Option<&Bound<'_, PyAny>>,
         value_funcs: Option<&Bound<'_, PyList>>,
+        with_stack: bool,
     ) -> PyResult<Py<PyAny>> {
         let mut token_iter = token_stream.try_iter()?;
         let mut eof_reached = false;
@@ -219,10 +260,15 @@ impl LRParserEngine {
                         .or_else(|_| item.getattr("index"))
                         .and_then(|p| p.extract::<usize>())
                         .unwrap_or(0);
-                    let endpos = item
-                        .getattr("end")
-                        .and_then(|e| e.extract::<usize>())
-                        .unwrap_or(lexpos);
+                    let endpos = match item.getattr("end") {
+                        Ok(end) => end.extract::<usize>()?,
+                        Err(error)
+                            if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) =>
+                        {
+                            lexpos + value.bind(py).str()?.len()?
+                        }
+                        Err(error) => return Err(error),
+                    };
                     Ok(PyParsedSymbol {
                         sym_type,
                         value,
@@ -247,14 +293,19 @@ impl LRParserEngine {
         };
 
         let mut statestack: Vec<usize> = vec![0];
-        let mut symstack: Vec<PyParsedSymbol> = vec![PyParsedSymbol {
-            sym_type: EOF_SYMBOL.to_string(),
-            value: py.None(),
-            lineno: 1,
-            endlineno: 1,
-            lexpos: 0,
-            endlexpos: 0,
-        }];
+        let symstack = Py::new(
+            py,
+            ParserStack {
+                symbols: vec![PyParsedSymbol {
+                    sym_type: EOF_SYMBOL.to_string(),
+                    value: py.None(),
+                    lineno: 1,
+                    endlineno: 1,
+                    lexpos: 0,
+                    endlexpos: 0,
+                }],
+            },
+        )?;
         let mut lookahead = fetch_next_token()?;
         let mut error_count: usize = 0;
 
@@ -275,7 +326,7 @@ impl LRParserEngine {
                 // Case 1: Shift (act > 0)
                 Some(shift_state) if shift_state > 0 => {
                     statestack.push(shift_state as usize);
-                    symstack.push(lookahead);
+                    symstack.borrow_mut(py).symbols.push(lookahead);
                     lookahead = fetch_next_token()?;
                     error_count = error_count.saturating_sub(1);
                 }
@@ -287,8 +338,9 @@ impl LRParserEngine {
 
                     let popped_syms: Vec<PyParsedSymbol> = if p_len > 0 {
                         statestack.truncate(statestack.len() - p_len);
-                        let split_idx = symstack.len() - p_len;
-                        symstack.split_off(split_idx)
+                        let mut stack = symstack.borrow_mut(py);
+                        let split_idx = stack.symbols.len() - p_len;
+                        stack.symbols.split_off(split_idx)
                     } else {
                         Vec::new()
                     };
@@ -334,7 +386,13 @@ impl LRParserEngine {
                                 .collect::<PyResult<Vec<_>>>()?,
                         )?;
                         let py_lhs = Py::new(py, lhs_sym.clone_symbol(py))?;
-                        let res = reduce_cb.call1((p_num, py_lhs, py_popped))?;
+                        let res = if with_stack {
+                            reduce_cb.call1((p_num, &py_lhs, py_popped, &symstack))?
+                        } else {
+                            reduce_cb.call1((p_num, &py_lhs, py_popped))?
+                        };
+                        // Preserve position edits performed through the action proxy.
+                        lhs_sym = py_lhs.borrow(py).clone_symbol(py);
                         lhs_sym.value = res.unbind();
                     } else {
                         lhs_sym.value = popped_syms
@@ -359,11 +417,17 @@ impl LRParserEngine {
                         })?;
 
                     statestack.push(next_state);
-                    symstack.push(lhs_sym);
+                    symstack.borrow_mut(py).symbols.push(lhs_sym);
                 }
                 // Case 3: Accept (act == 0)
                 Some(0) => {
-                    return Ok(symstack.last().unwrap().value.clone_ref(py));
+                    return Ok(symstack
+                        .borrow(py)
+                        .symbols
+                        .last()
+                        .unwrap()
+                        .value
+                        .clone_ref(py));
                 }
                 // Case 4: Syntax error / Error recovery
                 _ => {
@@ -401,7 +465,9 @@ impl LRParserEngine {
                         let pop_count = (statestack.len() - 1) - err_idx;
                         if pop_count > 0 {
                             statestack.truncate(statestack.len() - pop_count);
-                            symstack.truncate(symstack.len() - pop_count);
+                            let mut stack = symstack.borrow_mut(py);
+                            let new_len = stack.symbols.len() - pop_count;
+                            stack.symbols.truncate(new_len);
                         }
 
                         let top_st = *statestack.last().unwrap();
@@ -414,7 +480,7 @@ impl LRParserEngine {
                         if let Some(shift_st) = err_shift {
                             if shift_st > 0 {
                                 statestack.push(shift_st as usize);
-                                symstack.push(PyParsedSymbol {
+                                symstack.borrow_mut(py).symbols.push(PyParsedSymbol {
                                     sym_type: ERROR_SYMBOL.to_string(),
                                     value: lookahead.value.clone_ref(py),
                                     lineno: lookahead.lineno,

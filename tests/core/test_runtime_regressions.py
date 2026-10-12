@@ -238,3 +238,24 @@ def test_values_action_can_be_rebound_between_parses():
     assert parser.parse([Token("NUMBER", 42)]) == 43
     production.func = lambda value: value + 2
     assert parser.parse([Token("NUMBER", 42)]) == 44
+
+
+@pytest.mark.parametrize("rhs", [[], ["C"]])
+def test_action_negative_indices_read_remaining_stack(rhs):
+    grammar = Grammar({"A", "B", "C"})
+    grammar.add_production("result", ["A", "B", "seen"], lambda p: p[3])
+
+    def seen(p):
+        with pytest.raises(IndexError):
+            p[-4]
+        # Values to the left of the reduced RHS are on the remaining stack.
+        return p[-2], p[-1], list(p[1:])
+
+    grammar.add_production("seen", rhs, seen)
+    grammar.set_start("result")
+    tokens = [Token("A", 10), Token("B", 20)]
+    if rhs:
+        tokens.append(Token("C", 30))
+    parser = LRParser(LRTable(grammar))
+    assert parser.parse(tokens) == (10, 20, [30] if rhs else [])
+    assert parser.parse(tokens) == (10, 20, [30] if rhs else [])

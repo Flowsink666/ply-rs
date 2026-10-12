@@ -4,8 +4,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from rply.core.symbols import EOF_SYMBOL, START_SYMBOL
 from rply.core.grammar import Grammar, LRItem, Production, GrammarError
 from rply.core.conflicts import ConflictRecord
+from rply.core.table_data import ParseTableData, TableBuildResult
 
 MAXINT = 0x7FFFFFFF
+
+
+def build_table(grammar: Grammar) -> TableBuildResult:
+    return TableBuildResult(ParseTableData.from_table(PythonLRTable(grammar)))
 
 
 def digraph(
@@ -323,7 +328,7 @@ class PythonLRTable:
                         laheads = item.production.lookaheads.get(st, [])
                         for a in laheads:
                             existing = st_action.get(a)
-                            if existing is not None:
+                            if a in st_action:
                                 self._resolve_conflict(
                                     st, a, existing, -item.production.number, item, st_action, st_action_item
                                 )
@@ -339,7 +344,7 @@ class PythonLRTable:
                     if j >= 0:
                         if sym in self.grammar.Terminals:
                             existing = st_action.get(sym)
-                            if existing is not None:
+                            if sym in st_action:
                                 self._resolve_conflict(
                                     st, sym, existing, j, item, st_action, st_action_item
                                 )

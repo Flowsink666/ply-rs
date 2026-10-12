@@ -43,13 +43,18 @@ class ParserMeta(type):
         cls = super().__new__(mcs, name, bases, attrs)
         rules: List[Tuple[str, List[str], Callable[..., Any], Optional[str], str, int, str]] = []
 
-        # Inherit base rules
-        for base in reversed(bases):
-            if hasattr(base, "_collected_rules"):
-                rules.extend(getattr(base, "_collected_rules"))
-
-        for attr_name, attr_val in attrs.items():
+        # Preserve rule positions (and the implicit start rule) on override.
+        # Attribute lookup follows the MRO and diamonds contribute each once.
+        rule_names = dict.fromkeys(
+            attr_name for base in cls.__mro__[1:]
+            for attr_name in base.__dict__.get("_rule_names", ())
+        )
+        rule_names.update(attrs)
+        collected_names = []
+        for attr_name in rule_names:
+            attr_val = getattr(cls, attr_name, None)
             if callable(attr_val) and hasattr(attr_val, "_grammar_rules"):
+                collected_names.append(attr_name)
                 spec_list = getattr(attr_val, "_grammar_rules")
                 filename = inspect.getsourcefile(attr_val) or ""
                 try:
@@ -62,6 +67,7 @@ class ParserMeta(type):
                     rules.append((lhs, rhs, attr_val, prec, filename, firstline, action_style))
 
         cls._collected_rules = rules  # type: ignore
+        cls._rule_names = tuple(collected_names)  # type: ignore
         return cls
 
 

@@ -11,6 +11,8 @@ from rply.core.grammar import Grammar, GrammarError
 from rply.core.lr_table import LRTable
 from rply.core.lr_parser import LRParser, ProductionProxy
 from rply.compat.ply.lex import LexToken, Lexer as PlyLexer
+from rply.compat.ply._definitions import definition_namespace
+from rply.core.symbols import EOF_SYMBOL
 
 
 class YaccError(Exception):
@@ -25,8 +27,16 @@ class YaccProduction:
         self._proxy = proxy
 
     @property
+    def lexer(self) -> Any:
+        return self._proxy.lexer
+
+    @property
+    def parser(self) -> Any:
+        return self._proxy.parser
+
+    @property
     def slice(self) -> List[Any]:
-        return self._proxy._slice
+        return self._proxy.slice
 
     def __getitem__(self, n: Union[int, builtins.slice]) -> Any:
         return self._proxy[n]
@@ -85,7 +95,7 @@ class YaccParser:
                     if tok is None:
                         break
                     yield tok
-            return self._engine.parse(token_gen(), lexer=active_lexer, tracking=tracking)
+            return self._engine.parse(token_gen(), lexer=active_lexer, tracking=tracking, parser=self)
 
         if input is not None:
             if active_lexer is None:
@@ -95,7 +105,7 @@ class YaccParser:
         if active_lexer is None:
             raise YaccError("No token source or input provided to parse()")
 
-        return self._engine.parse(active_lexer, lexer=active_lexer, tracking=tracking)
+        return self._engine.parse(active_lexer, lexer=active_lexer, tracking=tracking, parser=self)
 
 
 def _parse_ply_docstring(doc: str) -> List[Tuple[str, List[str]]]:
@@ -152,10 +162,8 @@ def yacc(
     if module is None:
         frame = sys._getframe(1)
         mod_dict = frame.f_globals
-    elif isinstance(module, dict):
-        mod_dict = module
     else:
-        mod_dict = module.__dict__
+        mod_dict = definition_namespace(module)
 
     tokens = mod_dict.get("tokens", ())
     precedence = mod_dict.get("precedence", ())
@@ -227,6 +235,8 @@ def yacc(
     wrapped_err_func = None
     if error_func:
         def err_wrapper(tok: Any):
+            if tok.type == EOF_SYMBOL:
+                return error_func(None)
             ptok = LexToken()
             ptok.type = tok.type
             ptok.value = tok.value

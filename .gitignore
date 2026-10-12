@@ -25,6 +25,10 @@ venv/
 .env.*
 !.env.example
 
+# Documentation build output
+/docs
+/DEVELOPMENT_LOG.md
+
 # Independently cloned upstream reference repositories
 /upstream/ply/
 /upstream/sly/

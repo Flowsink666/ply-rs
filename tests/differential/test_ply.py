@@ -36,3 +36,43 @@ def test_ply_errors_match_upstream(upstream_ply):
         parser = parser_api.yacc(module=spec, debug=False)
         with pytest.raises(SyntaxError):
             parser.parse("1 + + 2", lexer=lexer)
+
+
+def test_object_definitions_and_independent_clones_match_upstream(upstream_ply):
+    def scan(api):
+        class Spec:
+            tokens = ("N",)
+            t_ignore = " "
+
+            def t_N(self, tok):
+                r"\d+"
+                tok.value = int(tok.value)
+                return tok
+
+        lexer = api.lex(object=Spec())
+        lexer.input("1 2")
+        assert lexer.token().value == 1
+        clone = lexer.clone()
+        clone.input("99")
+        return [t.value for t in lexer], [t.value for t in clone]
+
+    assert scan(lex) == scan(upstream_ply[0]) == ([2], [99])
+
+
+def test_eof_error_callback_matches_upstream(upstream_ply):
+    class Spec:
+        tokens = ("ENDNUMBER",)
+        t_ENDNUMBER = r"\d+"
+
+        def p_expr(self, p):
+            "expr : ENDNUMBER ENDNUMBER"
+            p[0] = p[1]
+
+        def p_error(self, tok):
+            raise SyntaxError("eof" if tok is None else "token")
+
+    for lexer_api, parser_api in [(lex, yacc), upstream_ply]:
+        lexer = lexer_api.lex(object=Spec())
+        parser = parser_api.yacc(module=Spec(), debug=False)
+        with pytest.raises(SyntaxError, match="^eof$"):
+            parser.parse("12", lexer=lexer)

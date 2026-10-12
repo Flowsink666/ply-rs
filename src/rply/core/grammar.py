@@ -221,11 +221,11 @@ class Grammar:
                 raise GrammarError(f"Precedence specified for unknown symbol {precedence!r}")
             prod_prec = self.Precedence[precedence]
         else:
-            # Find the rightmost terminal in syms with defined precedence
+            # The rightmost terminal determines precedence, even at level zero.
             prod_prec = ("right", 0)
             for s in reversed(syms):
-                if s in self.Precedence:
-                    prod_prec = self.Precedence[s]
+                if s in self.Terminals:
+                    prod_prec = self.Precedence.get(s, ("right", 0))
                     break
 
         pnumber = len(self.Productions)

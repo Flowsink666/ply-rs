@@ -32,17 +32,17 @@ class LexerMeta(type):
         rules: List[Tuple[str, str, str, Optional[Callable[..., Any]], int, int]] = []
         token_names: Set[str] = set()
 
-        # Collect inherited rules from base classes
-        for base in reversed(bases):
-            if hasattr(base, "_rules"):
-                rules.extend(getattr(base, "_rules"))
-            if hasattr(base, "tokens"):
-                token_names.update(getattr(base, "tokens"))
-
-        # Inspect class attributes in declaration order
-        for attr_name, attr_val in attrs.items():
+        # Preserve inherited rule positions, resolving overrides through the
+        # MRO. New attributes follow in declaration order; diamonds deduplicate.
+        rule_names = dict.fromkeys(
+            inherited[1] for base in cls.__mro__[1:]
+            for inherited in getattr(base, "_rules", ())
+        )
+        rule_names.update(attrs)
+        for attr_name in rule_names:
             if attr_name.startswith("_") or attr_name in ("ignore", "literals", "tokens", "states"):
                 continue
+            attr_val = getattr(cls, attr_name)
 
             if callable(attr_val) and getattr(attr_val, "_is_token_rule", False):
                 # Method decorated with @token

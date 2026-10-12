@@ -149,6 +149,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_rightmost_terminal_without_precedence() {
+        let mut g = Grammar::new(Some(
+            ["A".to_string(), "B".to_string()].into_iter().collect(),
+        ));
+        g.set_precedence(vec![("left".to_string(), vec!["A".to_string()])])
+            .unwrap();
+        g.add_production("s", vec!["A".to_string(), "B".to_string()], 1, None)
+            .unwrap();
+        assert_eq!(g.productions[0].precedence, ("right".to_string(), 0));
+    }
+
+    #[test]
     fn test_rust_grammar_first_follow() {
         let mut g = Grammar::new(Some(
             ["a".to_string(), "b".to_string()].into_iter().collect(),

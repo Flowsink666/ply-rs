@@ -11,6 +11,9 @@ src/rply/
     grammar.py          Grammar validation and FIRST/FOLLOW analysis
     symbols.py          Symbol constants and types
     tokens.py           Token, lexical rule, and lexical error types
+    lexer_config.py     Shared lexer definitions and immutable state snapshots
+    table_data.py       Backend-neutral parse table data and build results
+    parser_context.py   Per-parse callback context and semantic action handling
     production.py       Parser stack symbols and semantic action interface
     conflicts.py        Conflict records
     lexer_engine.py     Lexer backend dispatch
@@ -19,8 +22,11 @@ src/rply/
     diagnostics.py      Grammar and conflict reports
   backends/
     __init__.py         Extension loading and backend policy
+    interfaces.py       Structural lexer/parser runtime contracts
     python/             Reference lexer, LALR table builder, and LR runtime
     rust.py             Python grammar to native table adapter
+    rust_lexer.py       Native lexer runtime adapter
+    rust_parser.py      Native parser runtime adapter
   modern/               Class-based @token and @rule APIs
   compat/
     ply/                PLY module API and callback adapters
@@ -38,10 +44,54 @@ upstream/               Independent reference clones and reproduction notes
 ```
 
 The modern and compatibility APIs build shared grammar and engine objects.
-Public core engines select the backend; reference algorithms do not import
-the native extension or compatibility packages. PLY callbacks receive PLY
-tokens from their adapter. The native lexer only knows a generic callback
-owner, which keeps runtime positions and state changes synchronized.
+Public core engines select and hold backend runtimes through composition;
+they do not inherit reference implementations. Reference algorithms do not
+import the native extension or compatibility packages. PLY callbacks receive
+PLY tokens from their adapter. A callback's lexer owner is the public facade,
+which forwards position and state operations to its active runtime.
+
+`LexerConfig` stores definitions separately from scan state. Only the active
+runtime owns input, position, line number, current state, and the state stack.
+Public patterns retain Python regex validation; native compilation also applies
+its own supported syntax and flags. Validation does not construct a Python
+scanning runtime.
+`capture_state()` returns an immutable `LexerSnapshot`; `restore_state()`
+applies it to a runtime with matching state definitions. PLY clones use this
+interface instead of accessing backend state fields. The public `state_stack`
+is a mutable sequence view over the active runtime, including after fallback.
+Snapshots validate every field before changing input. Positions and line numbers
+use nonnegative platform-sized counters on both backends; zero line numbers and
+positions past EOF remain valid. A rejected restoration keeps the original
+runtime state. Native restoration also validates names against native states.
+
+Actions and error handlers may call `input()` or `restore_state()`. After an
+ignored callback the scanner resumes from the current input, position, and state;
+a returned token is delivered before the next scan resumes. Native scanners
+release input and Unicode index borrows before user callbacks. An input revision
+distinguishes replacing input from advancing within the same input, so error
+recovery does not automatically skip the first character of a replacement.
+
+A native configuration failure in auto mode transfers a snapshot to a Python
+runtime. If registration fails inside a callback, the callback finishes once
+and the retired scanner yields control before scanning the next token. Runtime
+and action exceptions continue to propagate without replay.
+Registration prepares and validates a shared definition before native setup,
+and commits it after setup or a successful handoff. Strict rejection, a warning
+promoted to an exception, or failed handoff preparation leaves the original
+definitions and runtime selected. Native rule compilation precedes state creation.
+Configure lexer definitions through registration methods; exposed definition
+maps are available for inspection, not direct updates to native configuration.
+
+Both table builders return `TableBuildResult` with the same `ParseTableData`
+structure. The facade exposes its action/goto dictionaries and diagnostics;
+the Rust adapter owns the native table and cache-validation snapshots. Public
+code passes that artifact through without inspecting native details.
+
+`ParseContext` supplies the lexer, parser owner, tracking option, and error
+callback for each parse invocation. Both runtimes use it for proxy actions;
+native value-style actions retain their direct-call path. PLY passes its public
+parser as an explicit parse argument, and recursive calls keep independent
+contexts instead of modifying a runtime's callback owner.
 
 Native lexer tokens are read through their Rust fields by the native parser;
 other token classes continue to use the Python attribute protocol. Both paths
@@ -51,10 +101,16 @@ Token iteration and token creation still involve Python objects.
 The native table retains shared, immutable runtime ACTION/GOTO rows. Parser
 instances share these rows through `Arc`; production callback metadata remains
 specific to each parser. The public Python table dictionaries remain available
-for inspection and editing. Snapshots detect edits before parser construction;
-an edited table uses the dictionary-based native constructor instead. This
-adds runtime rows and snapshot storage when building a native table, in return
-for avoiding repeated dictionary conversion for each parser instance.
+for inspection and editing. Snapshots detect edits before parser construction
+and at the start of subsequent parse calls, including edits to existing parser
+instances. Changed rows use the dictionary-based native constructor; unchanged
+rows retain their current native table. Each parse also checks production names,
+lengths, action presence, and action style. Metadata changes create an engine
+sharing the current rows through `Arc`, including previously edited rows.
+Unchanged parses only compare snapshots and metadata, without reconstructing
+rows. A recursive parse may refresh the runtime; the outer invocation keeps its
+own native engine reference. Configure tables and productions between parse
+calls; mutation during an active invocation is not a supported update contract.
 
 Productions without actions propagate values internally. Value-style actions
 receive RHS values directly; native parsing calls them without constructing

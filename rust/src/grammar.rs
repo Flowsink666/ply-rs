@@ -103,8 +103,12 @@ impl Grammar {
             None => {
                 let mut found = ("right".to_string(), 0);
                 for s in cleaned_syms.iter().rev() {
-                    if let Some(p) = self.precedence.get(s) {
-                        found = p.clone();
+                    if self.terminals.contains(s) {
+                        found = self
+                            .precedence
+                            .get(s)
+                            .cloned()
+                            .unwrap_or_else(|| ("right".to_string(), 0));
                         break;
                     }
                 }

@@ -1,86 +1,63 @@
-"""Public LR parser interface with optional native acceleration."""
+"""Public parser facade with a selected runtime and explicit callback context."""
 
 from typing import Any, Callable, Iterator, Optional, Sequence, Union
 
 from rply.backends import HAS_RUST_CORE, fallback, native_core
+from rply.backends.interfaces import ParserRuntime
 from rply.backends.python.parser import PythonLRParser
+from rply.backends.rust_parser import RustParserRuntime
 from rply.core.lr_table import LRTable
+from rply.core.parser_context import ParseContext
 from rply.core.production import ParsedSymbol, ProductionProxy, ParserError
+from rply.core.table_data import ParseTableData
 
 
-class LRParser(PythonLRParser):
-    """Run a shared parse table through the selected runtime backend."""
-
+class LRParser:
     def __init__(self, table: LRTable, error_func: Optional[Callable[..., Any]] = None):
-        super().__init__(table, error_func)
-        self._rs_engine = None
+        self.table = table
+        self._data = ParseTableData.from_table(table)
+        self.error_func = error_func
+        self._runtime: ParserRuntime
         self.backend = "python"
+        data = self._data
         if HAS_RUST_CORE:
             try:
-                num_states = len(table.states) or (max(table.action) + 1 if table.action else 0)
-                value_funcs = [
-                    p.func if p.action_style == "values" else None
-                    for p in self.productions
-                ]
-                metadata = (
-                    [p.name for p in self.productions],
-                    [p.len for p in self.productions],
-                    [bool(p.func) for p in self.productions],
-                    [bool(func) for func in value_funcs],
-                )
-                self._has_value_actions = any(metadata[-1])
-                if (
-                    getattr(table, "_rs_table", None) is not None
-                    and num_states == table._rs_table.num_states
-                    and self.action == table._native_action_snapshot
-                    and self.goto == table._native_goto_snapshot
-                ):
-                    self._rs_engine = native_core.LRParserEngine.from_table(table._rs_table, *metadata)
-                else:
-                    self._rs_engine = native_core.LRParserEngine(
-                        num_states, self.action, self.goto, *metadata,
-                    )
+                self._runtime = RustParserRuntime(data, native_core, getattr(table, "runtime_artifact", None))
             except Exception as error:
                 fallback("parser", error)
             else:
                 self.backend = "rust"
+                return
+        self._runtime = PythonLRParser(data)
 
-    def _parse_with_rust(self, token_stream: Any, lexer: Any = None) -> Any:
-        productions = self.productions
-        parser_self = self
+    @property
+    def productions(self):
+        return self._data.productions
 
-        def reduce_cb(p_num: int, lhs_sym: Any, popped_syms: list) -> Any:
-            p = productions[p_num]
-            if not p.func:
-                return lhs_sym.value
-            if p.action_style == "values":
-                res = p.func(*(s.value for s in popped_syms))
-                return lhs_sym.value if res is None else res
-            slice_items = [lhs_sym] + popped_syms
-            proxy = ProductionProxy(
-                slice_items,
-                stack=None,
-                lexer=lexer,
-                parser=parser_self,
-                namemap=p.namemap,
-            )
+    @productions.setter
+    def productions(self, value):
+        self._data.productions = value
 
-            res = p.func(proxy)
-            return proxy[0] if res is None else res
+    @property
+    def action(self):
+        return self._data.action
 
-        return self._rs_engine.parse(
-            token_stream,
-            reduce_cb,
-            self.error_func,
-            # Resolve callables for each parse, just as proxy actions do, so
-            # Production.bind() and rebinding an action remain effective.
-            [p.func for p in productions] if self._has_value_actions else None,
+    @action.setter
+    def action(self, value):
+        self._data.action = value
+
+    @property
+    def goto(self):
+        return self._data.goto
+
+    @goto.setter
+    def goto(self, value):
+        self._data.goto = value
+
+    def parse(self, token_stream: Union[Iterator[Any], Sequence[Any]],
+              lexer: Any = None, tracking: bool = True, *, parser: Any = None) -> Any:
+        context = ParseContext(
+            lexer=lexer, parser=self if parser is None else parser,
+            tracking=tracking, error_func=self.error_func,
         )
-
-    def parse(
-        self, token_stream: Union[Iterator[Any], Sequence[Any]],
-        lexer: Any = None, tracking: bool = True,
-    ) -> Any:
-        if self._rs_engine is not None:
-            return self._parse_with_rust(token_stream, lexer=lexer)
-        return super().parse(token_stream, lexer=lexer, tracking=tracking)
+        return self._runtime.parse(token_stream, context=context)

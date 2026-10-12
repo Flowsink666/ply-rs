@@ -52,6 +52,14 @@ class LexerMetaDict(dict):
         super().__init__()
         self.remap: Dict[Any, Any] = {}
 
+    def __setitem__(self, key: str, value: Any) -> None:
+        if isinstance(value, str):
+            value = TokenStr(value, key, self.remap)
+        elif callable(value) and isinstance(self.get(key), str):
+            # SLY permits a pattern assignment followed by a token method.
+            value.pattern = self[key]
+        super().__setitem__(key, value)
+
     def __getitem__(self, key: str) -> Any:
         if key not in self and key.split("ignore_")[-1].isupper() and not key.startswith("_"):
             return TokenStr(key, key, self.remap)
@@ -71,12 +79,32 @@ class LexerMeta(type):
         cls = super().__new__(mcs, name, bases, attrs)
         rules: List[Tuple[str, str, Optional[Callable[..., Any]]]] = []
 
-        tokens_attr = attrs.get("tokens", set())
+        tokens_attr = getattr(cls, "tokens", set())
         valid_tokens = set(tokens_attr) if tokens_attr else set()
+        inherited_rules = {}
+        remap = {}
+        for base in reversed(cls.__mro__[1:]):
+            valid_tokens.update(getattr(base, "tokens", ()))
+            remap.update(base.__dict__.get("_remap", {}))
+            for key, pat, func in base.__dict__.get("_sly_rules", ()):
+                inherited_rules.setdefault(key, [])
+        rule_names = dict.fromkeys(
+            key for base in cls.__mro__[1:]
+            for key in base.__dict__.get("_sly_rule_names", ())
+        )
+        rule_names.update(attrs)
+        # Resolve each inherited pattern through the MRO before applying overrides.
+        for key in inherited_rules:
+            for base in cls.__mro__[1:]:
+                patterns = [pat for name, pat, _ in base.__dict__.get("_sly_rules", ()) if name == key]
+                if patterns:
+                    inherited_rules[key] = patterns
+                    break
 
-        for key, val in attrs.items():
-            if key.startswith("_") or key in ("tokens", "ignore", "literals"):
+        for key in rule_names:
+            if key.startswith("_") or key in ("tokens", "ignore", "literals", "error"):
                 continue
+            val = getattr(cls, key, None)
 
             # Method rules
             if callable(val) and not inspect.isclass(val):
@@ -88,16 +116,15 @@ class LexerMeta(type):
                     valid_tokens.add(key)
                 else:
                     # Function rule, docstring or attribute pattern can define regex
-                    pat = getattr(val, "pattern", getattr(val, "__doc__", None))
+                    pat = getattr(val, "pattern", None)
+                    if not pat and (key in valid_tokens or key.startswith("ignore_")):
+                        pat = getattr(val, "__doc__", None)
                     if pat:
                         rules.append((key, pat.strip(), val))
                         valid_tokens.add(key)
-                    elif key.startswith("ignore_"):
-                        # Method for ignore rule
-                        pass
-                    elif key == "error":
-                        pass
-                    else:
+                    elif key in inherited_rules:
+                        rules.extend((key, pat, val) for pat in inherited_rules[key])
+                    elif key in valid_tokens:
                         rules.append((key, "", val))
 
             # String attribute rules, e.g. NUMBER = r'\d+'
@@ -106,7 +133,10 @@ class LexerMeta(type):
                 valid_tokens.add(key)
 
         cls._sly_rules = rules  # type: ignore
-        cls.tokens = valid_tokens  # type: ignore
+        cls._sly_rule_names = tuple(dict.fromkeys(name for name, _, _ in rules))  # type: ignore
+        remap.update(attrs.remap)
+        cls._remap = remap  # type: ignore
+        cls.tokens = {name for name in valid_tokens if not name.startswith("ignore_")}  # type: ignore
         return cls
 
 
@@ -155,25 +185,38 @@ class Lexer(metaclass=LexerMeta):
                 return res
             self._engine.set_error_func("INITIAL", wrap_err)
 
+        ignored_tokens = {name[7:] for name, _, _ in self._sly_rules if name.startswith("ignore_")}
+        token_funcs = {
+            name[7:] if name.startswith("ignore_") else name: func.__get__(self, self.__class__)
+            for name, _, func in self._sly_rules if func is not None
+        }
+
+        def make_wrapper(tname):
+            def wrapper(core_tok: CoreToken):
+                core_tok.type = self._remap.get((tname, core_tok.value), tname)
+                action = token_funcs.get(core_tok.type)
+                if action is not None:
+                    sly_tok = Token(core_tok.type, core_tok.value, core_tok.lineno, core_tok.lexpos, core_tok.end)
+                    res = action(sly_tok)
+                    if res is None:
+                        return None
+                    core_tok.type = getattr(res, "type", core_tok.type)
+                    core_tok.value = getattr(res, "value", res)
+                    core_tok.lineno = getattr(res, "lineno", core_tok.lineno)
+                    core_tok.lexpos = getattr(res, "index", core_tok.lexpos)
+                    core_tok.end = getattr(res, "end", core_tok.end)
+                return None if core_tok.type in ignored_tokens else core_tok
+            return wrapper
+
         for name, pat, func in self._sly_rules:
-            bound_func = None
-            if func is not None:
-                orig_method = func.__get__(self, self.__class__)
-                def make_wrapper(m, tname):
-                    def wrapper(core_tok: CoreToken):
-                        sly_tok = Token(tname, core_tok.value, core_tok.lineno, core_tok.lexpos, core_tok.end)
-                        res = m(sly_tok)
-                        if res is None:
-                            return None
-                        core_tok.type = getattr(res, "type", tname)
-                        core_tok.value = getattr(res, "value", res)
-                        core_tok.lineno = getattr(res, "lineno", core_tok.lineno)
-                        return core_tok
-                    return wrapper
-                bound_func = make_wrapper(orig_method, name)
+            token_name = name[7:] if name.startswith("ignore_") else name
+            needs_action = func is not None or token_name in ignored_tokens or any(
+                source == token_name for source, _ in self._remap
+            )
+            bound_func = make_wrapper(token_name) if needs_action else None
 
             if pat:
-                self._engine.add_rule("INITIAL", name, pat, bound_func)
+                self._engine.add_rule("INITIAL", token_name, pat, bound_func)
 
     def tokenize(self, text: str) -> Iterator[Token]:
         """Tokenize input string and yield SLY Token instances."""

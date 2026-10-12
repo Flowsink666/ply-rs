@@ -53,6 +53,10 @@ The parser builds on construction. Modern precedence entries have the form
 right sides. [The calculator](examples/calculator.py) shows operator
 precedence and literal parentheses.
 
+Lexer rules with a larger `@token(..., priority=N)` value match first.
+Equal priorities retain declaration order. Inclusive states combine their
+rules with `INITIAL` rules; `INITIAL` comes first when priorities are equal.
+
 Actions normally receive a production proxy (`p[1]`, `p.NUMBER`). For callbacks
 that take RHS values directly, use `@rule("expr : NUMBER", action_style="values")`
 or `Grammar.add_production(..., action_style="values")`. The default `auto`

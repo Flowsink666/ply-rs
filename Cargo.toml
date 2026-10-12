@@ -11,4 +11,4 @@ path = "rust/src/lib.rs"
 
 [dependencies]
 pyo3 = { version = "0.29", features = ["extension-module"] }
-regex = "1.11"
+regex-automata = "0.4"

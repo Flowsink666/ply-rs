@@ -34,6 +34,11 @@ cargo test
 Running directly from Python sources supports the fallback engine without
 Rust; building the mixed Python/Rust distribution requires Rust.
 
+Rebuild with `maturin develop --release` after changing native sources or
+updating a checkout that changes the runtime interface. An older installed
+extension may fail native setup; auto mode reports that failure and uses
+Python, while explicit Rust mode raises an initialization error.
+
 ## Run tests
 
 Run from the project root; pytest adds `src` to the import path:
@@ -89,6 +94,27 @@ Native lexer rules support `re.IGNORECASE`, `re.MULTILINE`, `re.DOTALL`,
 and an initialization error in explicit `rust` mode. The two regex engines
 still differ in syntax and some Unicode matching details; run application
 regression tests in both modes when using advanced patterns.
+
+## CI and releases
+
+CI runs on pushes to `main`, and on pull requests targeting `main`.
+You can also start CI from the GitHub Actions page using **Run workflow**.
+The workflow changes must be committed and pushed to GitHub before they take effect;
+a local commit alone does not trigger Actions.
+CI tests Python 3.9 through 3.14 on Linux, Windows, and macOS, selects the
+Rust and Python backends explicitly, and checks out the pinned PLY/SLY
+references so differential tests run on a clean checkout.
+The complete macOS matrix uses Intel runners; Python 3.11–3.14 also run
+on Apple Silicon. Older Python installers are unavailable on ARM runners;
+see the [setup-python compatibility notes](https://github.com/actions/setup-python/issues/906).
+
+CD builds release artifacts when a tag matching `v*` is pushed (for example,
+`v0.1.0`), then publishes them to a GitHub Release. A manual CD run builds
+artifacts; it publishes a release only when run against a tag. Ordinary branch
+pushes do not trigger CD.
+Linux wheel builds discover the interpreters in the manylinux build image;
+Windows and macOS builds use an explicit Python 3.9–3.14 matrix.
+macOS builds use Intel interpreters and cross-compile the Apple Silicon wheels.
 
 ## Repository hygiene
 

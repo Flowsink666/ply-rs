@@ -8,6 +8,34 @@ import sys
 import types
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from rply.core.lexer_engine import LexerEngine, Token as CoreToken, LexError
+from rply.compat.ply._definitions import definition_namespace
+
+
+class _RuleCallback:
+    """Keep built rule metadata separate from mutable action definitions."""
+
+    def __init__(self, function, pattern, code, name):
+        self.function = function
+        self.__doc__ = pattern
+        self.__code__ = code
+        self.__name__ = name
+
+    @classmethod
+    def freeze(cls, function):
+        if isinstance(function, cls):
+            return function
+        return cls(
+            function, getattr(function, "__doc__", None),
+            getattr(function, "__code__", None), getattr(function, "__name__", ""),
+        )
+
+    def rebind(self, object):
+        return type(self)(
+            getattr(object, self.__name__), self.__doc__, self.__code__, self.__name__,
+        )
+
+    def __call__(self, tok):
+        return self.function(tok)
 
 
 class LexToken:
@@ -34,6 +62,8 @@ class Lexer:
 
     def __init__(self, engine: LexerEngine):
         self._engine = engine
+        self._lex_spec = {}
+        self._reflags = 0
 
     @property
     def lineno(self) -> int:
@@ -104,8 +134,15 @@ class Lexer:
             yield t
 
     def clone(self, object: Any = None) -> "Lexer":
-        # Returns a clone of the lexer
-        return Lexer(self._engine)
+        definitions = dict(self._lex_spec)
+        if object is not None:
+            for name, value in definitions.items():
+                if name.startswith("t_") and callable(value):
+                    definitions[name] = value.rebind(object)
+        # Re-register callbacks so their lexer owner is the new wrapper.
+        cloned = lex(module=definitions, reflags=self._reflags)
+        cloned._engine.restore_state(self._engine.capture_state())
+        return cloned
 
 
 def lex(
@@ -126,19 +163,25 @@ def lex(
         frame = sys._getframe(1)
         mod_dict = frame.f_globals
     elif module is not None:
-        if isinstance(module, dict):
-            mod_dict = module
-        else:
-            mod_dict = module.__dict__
+        mod_dict = definition_namespace(module)
     else:
-        mod_dict = object.__dict__
+        mod_dict = definition_namespace(object)
 
-    tokens = mod_dict.get("tokens", ())
-    literals = mod_dict.get("literals", "")
-    states = mod_dict.get("states", ())
+    tokens = tuple(mod_dict.get("tokens", ()))
+    literals = tuple(mod_dict.get("literals", ""))
+    states = tuple(tuple(spec) for spec in mod_dict.get("states", ()))
 
     engine = LexerEngine()
     ply_lexer = Lexer(engine)
+    ply_lexer._lex_spec = {
+        name: _RuleCallback.freeze(value) if callable(value) else value
+        for name, value in mod_dict.items()
+        if name.startswith("t_") or name in {"tokens", "literals", "states"}
+    }
+    ply_lexer._lex_spec["tokens"] = tokens
+    ply_lexer._lex_spec["literals"] = literals
+    ply_lexer._lex_spec["states"] = states
+    ply_lexer._reflags = reflags
     if literals:
         engine.set_literals(literals)
 
