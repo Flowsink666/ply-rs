@@ -1,4 +1,4 @@
-from rply import Lexer, Parser, Token, token, rule
+from ply_rs import Lexer, Parser, Token, token, rule
 
 
 def test_modern_states_ignore_errors_and_snapshot_forwarding():

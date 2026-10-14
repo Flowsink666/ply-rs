@@ -6,8 +6,8 @@ import pickle
 
 import pytest
 
-from rply.compat.ply.lex import LexToken
-from rply.compat.sly.lex import Token
+from ply_rs.compat.ply.lex import LexToken
+from ply_rs.compat.sly.lex import Token
 from tests.compat.test_lazy_errors import TrackedText, make_lexer, scan, token_position
 
 
@@ -109,7 +109,7 @@ def test_pickle_state_keeps_original_public_field_names(adapter):
 
 @pytest.mark.parametrize("adapter", ["ply", "sly"])
 def test_pickles_created_with_original_public_slots_still_load(adapter, monkeypatch):
-    module = importlib.import_module(f"rply.compat.{adapter}.lex")
+    module = importlib.import_module(f"ply_rs.compat.{adapter}.lex")
     class_name = "LexToken" if adapter == "ply" else "Token"
     token_type = getattr(module, class_name)
     values = {"type": "LEGACY", "value": ["saved"], "lineno": 9}

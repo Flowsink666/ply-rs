@@ -39,10 +39,10 @@ def git_info(directory):
 
 def engine_info(engine):
     if engine == "rust":
-        import rply
-        info = {"source": str(Path(rply.__file__).resolve())}
+        import ply_rs
+        info = {"source": str(Path(ply_rs.__file__).resolve())}
         if engine == "rust":
-            from rply.backends import native_core
+            from ply_rs.backends import native_core
             artifact = Path(native_core.__file__).resolve()
             info.update(native_extension=str(artifact),
                         native_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest())
@@ -75,7 +75,7 @@ def measure(operation, options, byte_count, token_count, throughput=True):
 
 def worker(options):
     engine = options.engine[0]
-    os.environ["RPLY_BACKEND"] = "rust"
+    os.environ["PLY_RS_BACKEND"] = "rust"
     sys.path.insert(0, str(ROOT / "src"))
     cases = {}
     for name in options.case:

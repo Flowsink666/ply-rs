@@ -3,9 +3,9 @@ Unit tests for the Modern class-based Lexer and Parser API.
 """
 
 import pytest
-from rply.modern.lexer import Lexer, token
-from rply.modern.parser import Parser, rule
-from rply import Token
+from ply_rs.modern.lexer import Lexer, token
+from ply_rs.modern.parser import Parser, rule
+from ply_rs import Token
 
 
 def test_decorated_token_priority_precedes_string_rules():

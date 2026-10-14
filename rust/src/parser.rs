@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 fn parser_error(py: Python<'_>, message: String) -> PyErr {
     match py
-        .import("rply.core.production")
+        .import("ply_rs.core.production")
         .and_then(|module| module.getattr("ParserError"))
         .and_then(|class| class.call1((message,)))
     {

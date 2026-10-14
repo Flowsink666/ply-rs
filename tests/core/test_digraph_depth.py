@@ -4,8 +4,8 @@ import sys
 
 import pytest
 
-from rply import Grammar, LRParser, LRTable
-from rply.core.lr_table import digraph
+from ply_rs import Grammar, LRParser, LRTable
+from ply_rs.core.lr_table import digraph
 
 
 def test_long_nullable_grammar_builds_and_parses_without_changing_recursion_limit():

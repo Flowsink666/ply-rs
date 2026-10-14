@@ -2,7 +2,7 @@
 
 import pytest
 
-from rply import Grammar, LRParser, LRTable, Token
+from ply_rs import Grammar, LRParser, LRTable, Token
 
 
 def statement_parser(errors, *, nested=False, frozen=False):

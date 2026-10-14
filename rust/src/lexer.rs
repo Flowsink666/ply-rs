@@ -149,7 +149,7 @@ impl PyToken {
                 && self.value.bind(py).eq(other_token.value.bind(py))?;
             return Ok(PyBool::new(py, eq).to_owned().into_any().unbind());
         }
-        let token_class = py.import("rply.core.tokens")?.getattr("Token")?;
+        let token_class = py.import("ply_rs.core.tokens")?.getattr("Token")?;
         if !other.is_instance(&token_class)? {
             return Ok(py.NotImplemented());
         }
@@ -559,7 +559,7 @@ impl PyLexerEngine {
                 .unbind(),
         };
         let (native_pattern, ascii_only, required_prefix) = py
-            .import("rply.core.regex_support")?
+            .import("ply_rs.core.regex_support")?
             .getattr("native_pattern")?
             .call1((pattern, flags, compiled.bind(py)))?
             .extract::<(Option<String>, bool, String)>()?;
@@ -884,7 +884,7 @@ impl PyLexerEngine {
                         total_chars as isize,
                         1,
                     ))?;
-                    let cls = py.import("rply.core.lexer_engine")?.getattr("LexError")?;
+                    let cls = py.import("ply_rs.core.lexer_engine")?.getattr("LexError")?;
                     return Err(PyErr::from_value(cls.call1((
                         format!(
                             "Rule {:?} matched an empty string at pos {}",
@@ -934,7 +934,7 @@ impl PyLexerEngine {
                     // public Python token can retain this rare literal exactly.
                     let value = py.import("builtins")?.getattr("chr")?.call1((c,))?;
                     return Ok(Some(
-                        py.import("rply.core.tokens")?
+                        py.import("ply_rs.core.tokens")?
                             .getattr("Token")?
                             .call1((&value, &value, lineno, pos_now, pos_now + 1, owner))?
                             .unbind(),
@@ -964,7 +964,7 @@ impl PyLexerEngine {
                     .map(|owner| owner.clone_ref(py))
                     .unwrap_or_else(|| py.None());
                 let token = py
-                    .import("rply.core.tokens")?
+                    .import("ply_rs.core.tokens")?
                     .getattr("_LazyErrorToken")?
                     .call1((source.bind(py), pos_now, lineno, owner, total_chars))?;
                 let result = func.call1(py, (token,))?;
@@ -989,7 +989,7 @@ impl PyLexerEngine {
                 total_chars as isize,
                 1,
             ))?;
-            let cls = py.import("rply.core.lexer_engine")?.getattr("LexError")?;
+            let cls = py.import("ply_rs.core.lexer_engine")?.getattr("LexError")?;
             return Err(PyErr::from_value(cls.call1((message, remainder, pos_now))?));
         }
     }

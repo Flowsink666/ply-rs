@@ -6,9 +6,9 @@ import weakref
 
 import pytest
 
-from rply import Grammar, LRParser, LRTable, ProductionProxy, Token
-from rply.core import parser_context
-from rply.core.production import ParsedSymbol
+from ply_rs import Grammar, LRParser, LRTable, ProductionProxy, Token
+from ply_rs.core import parser_context
+from ply_rs.core.production import ParsedSymbol
 
 
 def make_parser(action, *, arity=2, frozen=False):

@@ -9,16 +9,16 @@ from types import SimpleNamespace
 
 import pytest
 
-import rply.backends as backends
-import rply.core.lexer_engine as lexer_module
-from rply import Grammar, LexerEngine, LRParser, LRTable, Token
+import ply_rs.backends as backends
+import ply_rs.core.lexer_engine as lexer_module
+from ply_rs import Grammar, LexerEngine, LRParser, LRTable, Token
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def run_python(backend, source):
     env = os.environ.copy()
-    env["RPLY_BACKEND"] = backend
+    env["PLY_RS_BACKEND"] = backend
     env["PYTHONPATH"] = str(ROOT / "src")
     return subprocess.run(
         [sys.executable, "-c", source], cwd=ROOT, env=env,
@@ -30,7 +30,7 @@ BLOCK_EXTENSION = """
 import importlib
 original = importlib.import_module
 def blocked(name, *args, **kwargs):
-    if name == 'rply._core_rs':
+    if name == 'ply_rs._core_rs':
         raise ImportError('extension deliberately unavailable')
     return original(name, *args, **kwargs)
 importlib.import_module = blocked
@@ -44,9 +44,9 @@ importlib.import_module = blocked
 
 
 def test_invalid_backend_is_rejected():
-    result = run_python("unknown", "import rply")
+    result = run_python("unknown", "import ply_rs")
     assert result.returncode != 0
-    assert "RPLY_BACKEND must be" in result.stderr
+    assert "PLY_RS_BACKEND must be" in result.stderr
 
 
 
@@ -71,15 +71,15 @@ def test_runtime_action_error_is_not_replayed():
 
 @pytest.mark.parametrize("mode", ["auto", "rust"])
 def test_native_extension_is_required_in_both_modes(mode):
-    result = run_python(mode, BLOCK_EXTENSION + "import rply")
+    result = run_python(mode, BLOCK_EXTENSION + "import ply_rs")
     assert result.returncode != 0
-    assert "rply requires the rply._core_rs native extension" in result.stderr
+    assert "ply-rs requires the ply_rs._core_rs native extension" in result.stderr
 
 
 def test_removed_python_backend_is_rejected_before_extension_loading():
-    result = run_python("python", BLOCK_EXTENSION + "import rply")
+    result = run_python("python", BLOCK_EXTENSION + "import ply_rs")
     assert result.returncode != 0
-    assert "RPLY_BACKEND=python is no longer supported" in result.stderr
+    assert "PLY_RS_BACKEND=python is no longer supported" in result.stderr
 
 
 def test_native_setup_failure_propagates_without_downgrade(monkeypatch):
@@ -97,7 +97,7 @@ def test_regex_compatibility_does_not_change_selected_backend(mode):
     result = run_python(mode, r'''
 import re
 import warnings
-from rply import LexerEngine
+from ply_rs import LexerEngine
 engine = LexerEngine()
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')

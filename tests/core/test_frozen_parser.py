@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from rply import Grammar, LRParser, LRTable, Token
-from rply.modern.parser import Parser, rule
+from ply_rs import Grammar, LRParser, LRTable, Token
+from ply_rs.modern.parser import Parser, rule
 
 
 def make_table(function=None, style="proxy"):

@@ -44,12 +44,12 @@ The pure-Python backend has been removed.
 Run from the project root; pytest adds `src` to the import path:
 
 ```powershell
-$env:RPLY_BACKEND = 'rust'
+$env:PLY_RS_BACKEND = 'rust'
 python -m pytest -q
-Remove-Item Env:RPLY_BACKEND
+Remove-Item Env:PLY_RS_BACKEND
 ```
 
-On POSIX shells, use `RPLY_BACKEND=rust python -m pytest -q`.
+On POSIX shells, use `PLY_RS_BACKEND=rust python -m pytest -q`.
 
 The behavioral suite runs on the required native engine. Policy tests use
 separate processes to verify rust, the auto alias, rejected python selection,
@@ -71,12 +71,12 @@ CI enables strict prerequisites. To reproduce that gate after building the
 extension and checking out both references:
 
 ```powershell
-$env:RPLY_BACKEND = 'rust'
+$env:PLY_RS_BACKEND = 'rust'
 python -m pytest -q --strict-prerequisites --junitxml=target/contracts-rust.xml
-Remove-Item Env:RPLY_BACKEND
+Remove-Item Env:PLY_RS_BACKEND
 ```
 
-`RPLY_STRICT_TESTS=1` enables the same gate. Strict runs require a loadable
+`PLY_RS_STRICT_TESTS=1` enables the same gate. Strict runs require a loadable
 native extension and both pinned references. Collection/execution skips fail;
 there are no backend-specific skip permissions. Non-strict local runs keep
 upstream references optional, but the native extension is always required.
@@ -91,7 +91,7 @@ compatibility, snapshot, frozen, exception, recovery, and GC behavior.
 
 For a local check, install the freshly built wheel with `--no-deps`, copy the
 script to an external temporary directory, change to that directory, unset
-`PYTHONPATH`, set `RPLY_CHECKOUT` to the checkout's absolute path, then run the
+`PYTHONPATH`, set `PLY_RS_CHECKOUT` to the checkout's absolute path, then run the
 fresh environment's Python with `-I verify_wheel.py --all`. Source pytest adds
 `src` to the import path and cannot replace this installed-artifact check.
 

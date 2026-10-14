@@ -5,9 +5,9 @@ import weakref
 
 import pytest
 
-from rply.compat.ply import lex as ply_lex
-from rply.compat.sly import Lexer as SlyLexer
-from rply.compat.sly.lex import Token as SlyToken
+from ply_rs.compat.ply import lex as ply_lex
+from ply_rs.compat.sly import Lexer as SlyLexer
+from ply_rs.compat.sly.lex import Token as SlyToken
 
 
 class TrackedText(str):

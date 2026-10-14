@@ -3,8 +3,8 @@ Unit tests for core Grammar and FIRST/FOLLOW calculation.
 """
 
 import pytest
-from rply.core.grammar import Grammar, Production, GrammarError
-from rply.core.symbols import EOF_SYMBOL, START_SYMBOL
+from ply_rs.core.grammar import Grammar, Production, GrammarError
+from ply_rs.core.symbols import EOF_SYMBOL, START_SYMBOL
 
 
 def test_grammar_first_follow():

@@ -1,7 +1,7 @@
 """Wide grammars must not repeatedly encode the same source item sets."""
 
 from benchmarks.workloads import wide_grammar
-from rply import Grammar, LRParser, LRTable, Token
+from ply_rs import Grammar, LRParser, LRTable, Token
 
 
 
@@ -39,7 +39,7 @@ def test_shared_transition_preserves_public_lookahead_and_conflict_order(monkeyp
     # regression checks the ordering produced by the original builder.
     monkeypatch.setenv("PYTHONHASHSEED", "0")
     result = run_python("rust", r'''
-from rply import Grammar, LRParser, LRTable
+from ply_rs import Grammar, LRParser, LRTable
 
 grammar = Grammar({'t0', 't1', 't2'})
 rules = [

@@ -8,7 +8,7 @@ from tests.core.test_backends import run_python
 
 
 def run_native(mode, source):
-    if importlib.util.find_spec("rply._core_rs") is None:
+    if importlib.util.find_spec("ply_rs._core_rs") is None:
         pytest.skip("native extension unavailable")
     result = run_python(mode, source)
     assert result.returncode == 0, result.stderr
@@ -18,7 +18,7 @@ def run_native(mode, source):
 def test_successful_native_scans_do_not_resolve_error_class(mode):
     run_native(mode, r'''
 import builtins
-from rply import LexerEngine
+from ply_rs import LexerEngine
 
 lexer = LexerEngine()
 assert lexer.backend == 'rust'
@@ -28,7 +28,7 @@ lexer.set_ignore('INITIAL', ' \n')
 original_import = builtins.__import__
 imports = []
 def tracked_import(name, *args, **kwargs):
-    if name == 'rply.core.lexer_engine':
+    if name == 'ply_rs.core.lexer_engine':
         imports.append(name)
     return original_import(name, *args, **kwargs)
 builtins.__import__ = tracked_import
@@ -48,7 +48,7 @@ assert imports == [], imports
 def test_native_handlers_and_callback_failures_do_not_resolve_error_class(mode):
     run_native(mode, r'''
 import builtins
-from rply import LexerEngine
+from ply_rs import LexerEngine
 
 lexer = LexerEngine()
 assert lexer.backend == 'rust'
@@ -59,7 +59,7 @@ def fail(tok):
     raise failure
 original_import = builtins.__import__
 def blocked_import(name, *args, **kwargs):
-    if name == 'rply.core.lexer_engine':
+    if name == 'ply_rs.core.lexer_engine':
         raise AssertionError('handled errors must not import LexError')
     return original_import(name, *args, **kwargs)
 builtins.__import__ = blocked_import
@@ -91,8 +91,8 @@ finally:
 @pytest.mark.parametrize("empty_rule", [False, True])
 def test_native_errors_use_the_current_monkeypatched_class(mode, empty_rule):
     run_native(mode, f"empty_rule = {empty_rule!r}\n" + r'''
-import rply.core.lexer_engine as lexer_module
-from rply import LexerEngine, LexError
+import ply_rs.core.lexer_engine as lexer_module
+from ply_rs import LexerEngine, LexError
 
 lexer = LexerEngine()
 assert lexer.backend == 'rust'
@@ -124,8 +124,8 @@ for expected in [FirstError, SecondError]:
 @pytest.mark.parametrize("mode", ["rust", "auto"])
 def test_discarded_action_can_change_error_class_during_the_same_scan(mode):
     run_native(mode, r'''
-import rply.core.lexer_engine as lexer_module
-from rply import LexerEngine, LexError
+import ply_rs.core.lexer_engine as lexer_module
+from ply_rs import LexerEngine, LexError
 
 lexer = LexerEngine()
 assert lexer.backend == 'rust'
@@ -154,8 +154,8 @@ def test_error_resolution_reentry_preserves_error_and_replacement_input(
     run_native(mode, f"empty_rule = {empty_rule!r}\nreentry = {reentry!r}\n" + r'''
 import builtins
 import types
-import rply.core.lexer_engine as lexer_module
-from rply import LexerEngine, LexError
+import ply_rs.core.lexer_engine as lexer_module
+from ply_rs import LexerEngine, LexError
 
 lexer = LexerEngine()
 assert lexer.backend == 'rust'
@@ -182,7 +182,7 @@ class HookedModule(types.ModuleType):
             replace_input()
         return super().__getattribute__(name)
 def hooked_import(name, *args, **kwargs):
-    if name == 'rply.core.lexer_engine' and reentry == 'import':
+    if name == 'ply_rs.core.lexer_engine' and reentry == 'import':
         replace_input()
     return original_import(name, *args, **kwargs)
 lexer_module.__class__ = HookedModule

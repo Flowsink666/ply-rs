@@ -11,12 +11,12 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def load_reference(name):
-    alias = f"_rply_reference_{name}"
+    alias = f"_ply_rs_reference_{name}"
     if alias in sys.modules:
         return sys.modules[alias]
     package = ROOT / "upstream" / name / "src" / name / "__init__.py"
     if not package.is_file():
-        if os.environ.get("RPLY_STRICT_TESTS", "").lower() in {"1", "true", "yes"}:
+        if os.environ.get("PLY_RS_STRICT_TESTS", "").lower() in {"1", "true", "yes"}:
             pytest.fail(f"Missing required upstream/{name} reference clone; see docs/upstream.md")
         pytest.skip(f"Missing upstream/{name} reference clone; see docs/upstream.md")
     spec = importlib.util.spec_from_file_location(alias, package)

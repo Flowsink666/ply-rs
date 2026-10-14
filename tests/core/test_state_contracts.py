@@ -8,10 +8,10 @@ import warnings
 
 import pytest
 
-from rply import Grammar, LexerEngine, LexError, LRParser, LRTable, Token
-from rply.core.production import ParserError
-import rply.backends as backends
-import rply.core.lexer_engine as lexer_module
+from ply_rs import Grammar, LexerEngine, LexError, LRParser, LRTable, Token
+from ply_rs.core.production import ParserError
+import ply_rs.backends as backends
+import ply_rs.core.lexer_engine as lexer_module
 from tests.core.test_backends import run_python
 
 
@@ -218,12 +218,12 @@ def test_native_metadata_refresh_reuses_an_edited_runtime_table(monkeypatch):
 @pytest.mark.parametrize("mode", ["rust", "auto"])
 @pytest.mark.parametrize("flags_failure", [False, True])
 def test_rejected_native_configuration_keeps_both_definitions_and_scan_state(mode, flags_failure):
-    if importlib.util.find_spec("rply._core_rs") is None:
+    if importlib.util.find_spec("ply_rs._core_rs") is None:
         pytest.skip("native extension unavailable")
     source = r'''
 import re
 import warnings
-from rply import LexerEngine
+from ply_rs import LexerEngine
 lexer = LexerEngine()
 lexer.add_rule('INITIAL', 'N', r'\d+')
 lexer.input('12')
@@ -259,12 +259,12 @@ assert lexer.token().value == '12'
 
 @pytest.mark.parametrize("from_error", [False, True])
 def test_input_replaced_after_callback_registration_is_not_skipped(from_error):
-    if importlib.util.find_spec("rply._core_rs") is None:
+    if importlib.util.find_spec("ply_rs._core_rs") is None:
         pytest.skip("native extension unavailable")
     source = r'''
 import re
 import warnings
-from rply import LexerEngine
+from ply_rs import LexerEngine
 lexer = LexerEngine()
 calls = []
 def action(tok):

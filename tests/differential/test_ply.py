@@ -2,7 +2,7 @@
 
 import pytest
 
-from rply.compat.ply import lex, yacc
+from ply_rs.compat.ply import lex, yacc
 from tests.fixtures import ply_calculator as spec
 
 pytestmark = pytest.mark.differential

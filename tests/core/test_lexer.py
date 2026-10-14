@@ -5,7 +5,7 @@ import weakref
 
 import pytest
 
-from rply import LexerEngine
+from ply_rs import LexerEngine
 
 
 def test_lexer_error_recovery_no_infinite_loop():

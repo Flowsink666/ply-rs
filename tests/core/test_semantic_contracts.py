@@ -3,7 +3,7 @@
 import pytest
 from types import SimpleNamespace
 
-from rply import Grammar, LexerEngine, LRParser, LRTable, Token
+from ply_rs import Grammar, LexerEngine, LRParser, LRTable, Token
 
 
 @pytest.mark.parametrize("resolved_zero_override", [False, True])

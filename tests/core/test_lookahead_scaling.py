@@ -2,12 +2,12 @@
 
 import pytest
 
-from rply.core.diagnostics import DiagnosticsFormatter
-from rply.core.grammar import Grammar
-from rply import LRTable, LRParser
-from rply.core.symbols import EOF_SYMBOL
-from rply.core.table_data import ParseTableData
-from rply.core.tokens import Token
+from ply_rs.core.diagnostics import DiagnosticsFormatter
+from ply_rs.core.grammar import Grammar
+from ply_rs import LRTable, LRParser
+from ply_rs.core.symbols import EOF_SYMBOL
+from ply_rs.core.table_data import ParseTableData
+from ply_rs.core.tokens import Token
 
 
 def state_keys(table):

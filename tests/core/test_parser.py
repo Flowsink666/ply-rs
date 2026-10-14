@@ -3,10 +3,10 @@ Unit tests for core LR runtime parser execution.
 """
 
 import pytest
-from rply.core.grammar import Grammar
-from rply.core.lr_table import LRTable
-from rply.core.lr_parser import LRParser
-from rply.core.lexer_engine import Token
+from ply_rs.core.grammar import Grammar
+from ply_rs.core.lr_table import LRTable
+from ply_rs.core.lr_parser import LRParser
+from ply_rs.core.lexer_engine import Token
 
 
 def test_core_parser_arithmetic():

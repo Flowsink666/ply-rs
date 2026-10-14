@@ -3,9 +3,9 @@
 import gc
 import weakref
 
-from rply import Grammar, LexerEngine, LRParser, LRTable, Token
-from rply.backends import native_core
-from rply.core.production import ParsedSymbol
+from ply_rs import Grammar, LexerEngine, LRParser, LRTable, Token
+from ply_rs.backends import native_core
+from ply_rs.core.production import ParsedSymbol
 
 
 class Holder:

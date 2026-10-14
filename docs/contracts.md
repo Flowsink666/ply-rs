@@ -35,14 +35,14 @@ so failures include a short reproducible sequence and normal CI stays practical.
 Recovery checks have three separate sources of evidence:
 
 1. A simple statement specification supplies expected results and callbacks.
-2. The same ACTION/GOTO table runs through rply and upstream PLY to isolate the
+2. The same ACTION/GOTO table runs through ply-rs and upstream PLY to isolate the
    execution/recovery algorithm.
 3. Independent table builders run shared grammar specifications to detect
    compilation errors that a shared-table comparison cannot detect.
 
 Known differences are explicit assertions. PLY counts the synthetic error shift
-towards callback suppression; rply counts three real input shifts. PLY rejects
-duplicate precedence declarations; rply accepts updates. Generic Python token
+towards callback suppression; ply-rs counts three real input shifts. PLY rejects
+duplicate precedence declarations; ply-rs accepts updates. Generic Python token
 positions need not have the same representation as native unsigned fields.
 Do not suppress arbitrary differences by normalizing all exceptions or callbacks.
 

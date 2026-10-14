@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from rply import Token
-from rply.compat import sly
-from rply.compat.ply import yacc
+from ply_rs import Token
+from ply_rs.compat import sly
+from ply_rs.compat.ply import yacc
 
 pytestmark = pytest.mark.differential
 

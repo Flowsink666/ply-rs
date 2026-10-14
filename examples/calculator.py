@@ -1,6 +1,6 @@
 """Modern API calculator. Run after installing the project in a virtualenv."""
 
-from rply import Lexer, Parser, rule, token
+from ply_rs import Lexer, Parser, rule, token
 
 
 class CalculatorLexer(Lexer):

@@ -30,9 +30,9 @@ def measure(operation, repeat, iterations):
 
 def benchmark(mode, repeat, iterations):
     # Import after selecting the process-wide backend.
-    os.environ["RPLY_BACKEND"] = mode
+    os.environ["PLY_RS_BACKEND"] = mode
     sys.path.insert(0, str(ROOT / "src"))
-    from rply import Grammar, LexerEngine, LRParser, LRTable
+    from ply_rs import Grammar, LexerEngine, LRParser, LRTable
 
     results = {}
     for name, (size, extra_rules, actions, unicode_text, named) in CASES.items():

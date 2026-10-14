@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rply import Grammar, LexerEngine, LexError, LRParser, LRTable, Token
+from ply_rs import Grammar, LexerEngine, LexError, LRParser, LRTable, Token
 from tests.core.test_backends import run_python
 
 
@@ -131,12 +131,12 @@ def test_parser_accepts_table_data_without_builder_diagnostics():
 
 @pytest.mark.parametrize("from_error", [False, True])
 def test_rule_registration_after_callback_finishes_without_replay(from_error):
-    if importlib.util.find_spec("rply._core_rs") is None:
+    if importlib.util.find_spec("ply_rs._core_rs") is None:
         pytest.skip("native extension unavailable")
     source = r'''
 import re
 import warnings
-from rply import LexerEngine
+from ply_rs import LexerEngine
 lexer = LexerEngine()
 assert lexer.backend == 'rust'
 calls = []
@@ -162,12 +162,12 @@ assert len(caught) == 0
 
 
 def test_rule_registration_preserves_nested_state_and_callback_owner():
-    if importlib.util.find_spec("rply._core_rs") is None:
+    if importlib.util.find_spec("ply_rs._core_rs") is None:
         pytest.skip("native extension unavailable")
     result = run_python("auto", r'''
 import re
 import warnings
-from rply import LexerEngine
+from ply_rs import LexerEngine
 lexer = LexerEngine()
 assert lexer.backend == 'rust'
 lexer.add_state('inside', 'exclusive')
@@ -198,17 +198,17 @@ assert lexer.current_state == 'INITIAL' and stack == []
 
 
 def test_native_engines_do_not_import_removed_backend():
-    if importlib.util.find_spec("rply._core_rs") is None:
+    if importlib.util.find_spec("ply_rs._core_rs") is None:
         pytest.skip("native extension unavailable")
     result = run_python("rust", r'''
 import importlib.abc
 import sys
 class BlockRemovedBackend(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.startswith('rply.backends.python'):
+        if fullname.startswith('ply_rs.backends.python'):
             raise AssertionError('Removed backend imported')
 sys.meta_path.insert(0, BlockRemovedBackend())
-from rply import Grammar, LexerEngine, LRParser, LRTable
+from ply_rs import Grammar, LexerEngine, LRParser, LRTable
 lexer = LexerEngine()
 lexer.add_rule('INITIAL', 'N', r'\d+')
 grammar = Grammar({'N'})

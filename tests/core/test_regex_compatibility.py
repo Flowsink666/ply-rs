@@ -5,8 +5,8 @@ import warnings
 
 import pytest
 
-from rply import LexerEngine, LexError
-from rply.backends import native_core
+from ply_rs import LexerEngine, LexError
+from ply_rs.backends import native_core
 
 
 @pytest.mark.parametrize("pattern,flags,text,pos", [
@@ -97,7 +97,7 @@ def test_optional_regex_translation_failure_uses_compiled_matcher(monkeypatch):
 
 
 def test_optional_regex_rendering_limit_uses_compiled_matcher(monkeypatch):
-    from rply.core import regex_support
+    from ply_rs.core import regex_support
 
     def unavailable(*args, **kwargs):
         raise RecursionError("optional rendering limit")
@@ -214,7 +214,7 @@ def test_native_token_length_uses_string_content_without_subclass_hooks():
 
 
 def test_direct_native_counters_reject_overflow_without_state_changes():
-    from rply.core.lexer_config import MAX_LEXER_COUNTER
+    from ply_rs.core.lexer_config import MAX_LEXER_COUNTER
 
     lexer = native_core.LexerEngine()
     lexer.pos = MAX_LEXER_COUNTER
@@ -228,7 +228,7 @@ def test_direct_native_counters_reject_overflow_without_state_changes():
 
 @pytest.mark.parametrize("direct", [False, True])
 def test_newline_counter_overflow_preserves_scan_position(direct):
-    from rply.core.lexer_config import MAX_LEXER_COUNTER
+    from ply_rs.core.lexer_config import MAX_LEXER_COUNTER
 
     lexer = native_core.LexerEngine() if direct else LexerEngine()
     lexer.set_ignore("INITIAL", "\n")

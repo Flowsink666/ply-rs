@@ -6,7 +6,7 @@ import weakref
 
 import pytest
 
-from rply import LexerEngine, Token
+from ply_rs import LexerEngine, Token
 from tests.core.test_backends import run_python
 
 
@@ -219,11 +219,11 @@ def test_original_input_reference_participates_in_garbage_collection():
 
 
 def test_unread_error_token_survives_callback_rule_registration():
-    if importlib.util.find_spec("rply._core_rs") is None:
+    if importlib.util.find_spec("ply_rs._core_rs") is None:
         pytest.skip("native extension unavailable")
     result = run_python("auto", r'''
 import warnings
-from rply import LexerEngine
+from ply_rs import LexerEngine
 lexer = LexerEngine()
 assert lexer.backend == 'rust'
 saved = []
@@ -280,9 +280,9 @@ def test_token_comparison_defers_unknown_objects():
 
 
 def test_tokens_compare_in_both_directions_across_backends():
-    if importlib.util.find_spec("rply._core_rs") is None:
+    if importlib.util.find_spec("ply_rs._core_rs") is None:
         pytest.skip("native extension unavailable")
-    from rply._core_rs import Token as NativeToken
+    from ply_rs._core_rs import Token as NativeToken
 
     python = Token("N", [1, 2])
     native = NativeToken("N", [1, 2])
@@ -339,7 +339,7 @@ def test_input_counts_string_content_without_subclass_length_hooks(text):
 def test_error_token_factory_changes_preserve_progress(
     monkeypatch, replace_input, factory_error, text,
 ):
-    import rply.core.tokens as token_module
+    import ply_rs.core.tokens as token_module
 
     lexer = LexerEngine()
     lexer.add_rule("INITIAL", "WORD", r"[a-z]+")

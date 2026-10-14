@@ -4,9 +4,9 @@ import pytest
 import importlib
 from types import SimpleNamespace
 
-from rply import Grammar, LRParser, LRTable, Token
-from rply.core.parser_context import ParseContext
-from rply.core.table_data import ParseTableData
+from ply_rs import Grammar, LRParser, LRTable, Token
+from ply_rs.core.parser_context import ParseContext
+from ply_rs.core.table_data import ParseTableData
 
 
 @pytest.mark.parametrize("arity", range(6))
@@ -114,9 +114,9 @@ def test_custom_reduction_context_keeps_rhs_only_arguments(instance_hook):
 
 
 def test_older_native_interface_keeps_its_original_parse_keywords():
-    from rply.backends.rust_parser import RustParserRuntime
+    from ply_rs.backends.rust_parser import RustParserRuntime
 
-    native = importlib.import_module("rply._core_rs")
+    native = importlib.import_module("ply_rs._core_rs")
     calls = []
 
     class OlderEngine:
@@ -142,7 +142,7 @@ def test_older_native_interface_keeps_its_original_parse_keywords():
 @pytest.mark.parametrize("with_stack", [False, True])
 @pytest.mark.parametrize("arity", [0, 1])
 def test_low_level_native_callback_keeps_default_rhs_only_protocol(with_stack, arity):
-    native = importlib.import_module("rply._core_rs")
+    native = importlib.import_module("ply_rs._core_rs")
     if arity:
         action = {0: {"N": 1}, 1: {"$end": -1}, 2: {"$end": 0}}
         goto = {0: {"s": 2}}

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rply import Grammar, LRTable, LRParser, LexerEngine, Token, LexError
+from ply_rs import Grammar, LRTable, LRParser, LexerEngine, Token, LexError
 
 
 @pytest.mark.parametrize("pattern,text,accepted", [

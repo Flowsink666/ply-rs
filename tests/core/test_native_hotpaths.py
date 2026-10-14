@@ -7,11 +7,11 @@ from functools import wraps
 
 import pytest
 
-from rply import Grammar, LexerEngine, LexError, LRParser, LRTable, Token
-from rply.core.parser_context import ParseContext
-from rply.core.lexer_config import LexerConfig
-from rply.core.production import ParserError
-from rply.core.table_data import ParseTableData
+from ply_rs import Grammar, LexerEngine, LexError, LRParser, LRTable, Token
+from ply_rs.core.parser_context import ParseContext
+from ply_rs.core.lexer_config import LexerConfig
+from ply_rs.core.production import ParserError
+from ply_rs.core.table_data import ParseTableData
 
 
 @pytest.mark.parametrize("patterns,text,expected", [

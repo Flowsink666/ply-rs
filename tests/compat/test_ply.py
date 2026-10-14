@@ -1,6 +1,6 @@
 """PLY compatibility tests."""
 
-from rply.compat.ply import lex, yacc
+from ply_rs.compat.ply import lex, yacc
 from tests.fixtures import ply_calculator as spec
 import pytest
 

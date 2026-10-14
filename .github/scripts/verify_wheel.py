@@ -2,7 +2,7 @@
 
 Only the standard library is needed. Run ``python -I verify_wheel.py --all``
 from a temporary directory using a fresh virtual environment containing the
-wheel. Each backend runs in its own subprocess before importing rply.
+wheel. Each backend runs in its own subprocess before importing ply_rs.
 """
 
 import argparse
@@ -26,14 +26,14 @@ def verify_origin(module):
     prefix = Path(sys.prefix).resolve()
     origin = Path(module.__file__).resolve()
     require(sys.prefix != sys.base_prefix, "verification must run in a fresh virtual environment")
-    require(prefix in origin.parents, f"rply came from {origin}, outside the virtual environment")
+    require(prefix in origin.parents, f"ply_rs came from {origin}, outside the virtual environment")
     require(sys.flags.isolated, "invoke verification with python -I")
     require("PYTHONPATH" not in os.environ, "clear PYTHONPATH before verifying the wheel")
-    checkout = os.environ.get("RPLY_CHECKOUT")
+    checkout = os.environ.get("PLY_RS_CHECKOUT")
     if checkout:
         root = Path(checkout).resolve()
         source = root / "src"
-        require(source != origin and source not in origin.parents, f"rply came from checkout/src: {origin}")
+        require(source != origin and source not in origin.parents, f"ply_rs came from checkout/src: {origin}")
         cwd = Path.cwd().resolve()
         require(root != cwd and root not in cwd.parents, "run verification outside the checkout")
     return str(origin)
@@ -46,10 +46,10 @@ def verify_loaded_origins(modules=None, installed_roots=None):
     if installed_roots is None:
         installed_roots = [sysconfig.get_path("purelib"), sysconfig.get_path("platlib")]
     roots = {Path(path).resolve() for path in installed_roots}
-    checkout = os.environ.get("RPLY_CHECKOUT")
+    checkout = os.environ.get("PLY_RS_CHECKOUT")
     source = Path(checkout).resolve() / "src" if checkout else None
     for name, module in modules.items():
-        if name != "rply" and not name.startswith("rply."):
+        if name != "ply_rs" and not name.startswith("ply_rs."):
             continue
         filename = getattr(module, "__file__", None)
         if filename is None:
@@ -63,12 +63,12 @@ def verify_loaded_origins(modules=None, installed_roots=None):
 
 
 def verify(backend):
-    os.environ["RPLY_BACKEND"] = backend
-    import rply
-    from rply import Grammar, Lexer, LexerEngine, LRParser, LRTable, Parser, ProductionProxy, Token, rule, token
-    from rply.compat import ply, sly
+    os.environ["PLY_RS_BACKEND"] = backend
+    import ply_rs
+    from ply_rs import Grammar, Lexer, LexerEngine, LRParser, LRTable, Parser, ProductionProxy, Token, rule, token
+    from ply_rs.compat import ply, sly
 
-    origin = verify_origin(rply)
+    origin = verify_origin(ply_rs)
     expected_backend = "rust"
     lexer = LexerEngine()
     lexer.add_rule("INITIAL", "N", r"\d+")
@@ -120,7 +120,7 @@ def verify(backend):
         raise AssertionError("token getter exception was swallowed")
     require(calls == [], "action executed after token conversion failed")
 
-    from rply.core.parser_context import ParseContext
+    from ply_rs.core.parser_context import ParseContext
 
     regex_lexer = LexerEngine()
     with warnings.catch_warnings():
@@ -481,7 +481,7 @@ def verify(backend):
         original_import = builtins.__import__
 
         def forbid_error_import(name, *args, **kwargs):
-            require(name != "rply.core.lexer_engine", "normal token imported LexError")
+            require(name != "ply_rs.core.lexer_engine", "normal token imported LexError")
             return original_import(name, *args, **kwargs)
 
         builtins.__import__ = forbid_error_import
@@ -557,8 +557,8 @@ def verify(backend):
 
     require(RecoveryParser().parse(iter([Token("N", 1), Token("BAD", "?"), Token("SEMI", ";")])) ==
             "recovered", "SLY errok retains grammar recovery")
-    require(Path(rply.__file__).with_name("py.typed").is_file(), "wheel omitted py.typed")
-    require(not any(name.startswith("rply.backends.python") for name in sys.modules),
+    require(Path(ply_rs.__file__).with_name("py.typed").is_file(), "wheel omitted py.typed")
+    require(not any(name.startswith("ply_rs.backends.python") for name in sys.modules),
             "wheel imported the removed Python backend")
 
     verify_loaded_origins()

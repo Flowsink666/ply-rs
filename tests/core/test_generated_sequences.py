@@ -10,8 +10,8 @@ from itertools import product
 
 import pytest
 
-from rply import Grammar, LexerEngine, LexError, LRParser, LRTable, Token
-from rply.core.lexer_config import LexerSnapshot
+from ply_rs import Grammar, LexerEngine, LexError, LRParser, LRTable, Token
+from ply_rs.core.lexer_config import LexerSnapshot
 from tests.fixtures.adversarial import (
     CallbackFailure, FinalizingText, RecordingAction, lexer_state,
 )

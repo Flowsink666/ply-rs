@@ -1,4 +1,4 @@
-"""Run identical workload definitions with rply, upstream PLY, or upstream SLY."""
+"""Run identical workload definitions with ply-rs, upstream PLY, or upstream SLY."""
 
 import importlib
 import importlib.util
@@ -29,8 +29,8 @@ class Runtime:
         self.state_count = state_count
 
 
-def build_rply(workload, engine):
-    from rply import Grammar, LexerEngine, LRParser, LRTable
+def build_ply_rs(workload, engine):
+    from ply_rs import Grammar, LexerEngine, LRParser, LRTable
 
     lexer = LexerEngine()
     for rule in workload.tokens:
@@ -104,7 +104,7 @@ def build_ply(workload):
     import inspect
     kwargs = {"write_tables": False} if "write_tables" in inspect.signature(yacc.yacc).parameters else {}
     if "tabmodule" in inspect.signature(yacc.yacc).parameters:
-        kwargs["tabmodule"] = "_rply_benchmark_no_cached_table"
+        kwargs["tabmodule"] = "_ply_rs_benchmark_no_cached_table"
     parser = yacc.yacc(module=spec, start=workload.start, debug=False, **kwargs)
 
     def tokenize(text):
@@ -165,5 +165,5 @@ def build_sly(workload):
 
 def build(workload, engine):
     if engine == "rust":
-        return build_rply(workload, engine)
+        return build_ply_rs(workload, engine)
     return {"ply": build_ply, "sly": build_sly}[engine](workload)

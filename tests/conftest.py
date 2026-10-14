@@ -23,36 +23,36 @@ def pytest_addoption(parser):
 
 def strict_prerequisites(config):
     return config.getoption("strict_prerequisites", default=False) or (
-        os.environ.get("RPLY_STRICT_TESTS", "").lower() in {"1", "true", "yes"}
+        os.environ.get("PLY_RS_STRICT_TESTS", "").lower() in {"1", "true", "yes"}
     )
 
 
 def verify_backend(requested, components, extension_available):
     """Verify the required engine and its compatibility alias."""
     if requested not in {"rust", "auto"}:
-        raise pytest.UsageError(f"Invalid RPLY_BACKEND: {requested!r}")
+        raise pytest.UsageError(f"Invalid PLY_RS_BACKEND: {requested!r}")
     if not extension_available:
         raise pytest.UsageError(
-            "Strict prerequisites require the loadable rply._core_rs native extension."
+            "Strict prerequisites require the loadable ply_rs._core_rs native extension."
         )
     expected = "rust"
     for name, component in components.items():
         if component.backend != expected:
             raise pytest.UsageError(
-                f"RPLY_BACKEND={requested}: basic {name} selected "
+                f"PLY_RS_BACKEND={requested}: basic {name} selected "
                 f"{component.backend!r}, expected {expected!r}"
             )
 
 
 def native_prerequisite_available():
-    if importlib.util.find_spec("rply._core_rs") is None:
+    if importlib.util.find_spec("ply_rs._core_rs") is None:
         return False
     try:
         # A .pyd/.so file may exist but fail to load due to ABI or DLL issues.
-        importlib.import_module("rply._core_rs")
+        importlib.import_module("ply_rs._core_rs")
     except Exception as error:
         raise pytest.UsageError(
-            "Strict prerequisites found rply._core_rs but could not load it: "
+            "Strict prerequisites found ply_rs._core_rs but could not load it: "
             f"{type(error).__name__}: {error}"
         ) from error
     return True
@@ -67,7 +67,7 @@ def pytest_configure(config):
             raise pytest.UsageError(
                 f"Strict prerequisites require upstream/{name}; see docs/upstream.md"
             )
-    from rply import Grammar, LexerEngine, LRParser, LRTable
+    from ply_rs import Grammar, LexerEngine, LRParser, LRTable
 
     lexer = LexerEngine()
     lexer.add_rule("INITIAL", "N", r"\d+")
@@ -77,7 +77,7 @@ def pytest_configure(config):
     table = LRTable(grammar)
     parser = LRParser(table)
     verify_backend(
-        os.environ.get("RPLY_BACKEND", "auto").lower(),
+        os.environ.get("PLY_RS_BACKEND", "auto").lower(),
         {"lexer": lexer, "table builder": table, "parser": parser},
         native_prerequisite_available(),
     )
@@ -87,7 +87,7 @@ def pytest_configure(config):
 
 def pytest_report_header(config):
     if strict_prerequisites(config):
-        return "rply strict prerequisites: enabled; no skipped contracts"
+        return "ply-rs strict prerequisites: enabled; no skipped contracts"
 
 
 

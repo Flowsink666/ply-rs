@@ -2,7 +2,7 @@
 
 import pytest
 
-from rply.compat import sly
+from ply_rs.compat import sly
 from tests.fixtures.sly_calculator import build_calculator
 
 pytestmark = pytest.mark.differential

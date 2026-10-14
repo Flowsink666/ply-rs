@@ -2,9 +2,9 @@
 Unit tests for rich diagnostics formatting.
 """
 
-from rply.core.grammar import Grammar
-from rply.core.lr_table import LRTable
-from rply.core.diagnostics import DiagnosticsFormatter
+from ply_rs.core.grammar import Grammar
+from ply_rs.core.lr_table import LRTable
+from ply_rs.core.diagnostics import DiagnosticsFormatter
 
 
 def test_diagnostics_formatting():

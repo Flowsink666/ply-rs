@@ -3,7 +3,7 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "rply-next"
+name = "ply-rs"
 version = "0.1.0"
 description = "Modern successor to PLY and SLY with a native Rust engine and Python APIs"
 readme = "README.md"
@@ -33,7 +33,7 @@ test = ["pytest>=7.0"]
 
 [tool.maturin]
 python-source = "src"
-module-name = "rply._core_rs"
+module-name = "ply_rs._core_rs"
 include = [
     { path = "benchmarks/**/*", format = "sdist" },
     { path = "tests/**/*", format = "sdist" },

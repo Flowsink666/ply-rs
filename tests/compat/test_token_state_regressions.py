@@ -5,8 +5,8 @@ import pickle
 
 import pytest
 
-from rply.compat.ply.lex import LexToken
-from rply.compat.sly.lex import Token
+from ply_rs.compat.ply.lex import LexToken
+from ply_rs.compat.sly.lex import Token
 
 
 class ValueSlotPlyToken(LexToken):

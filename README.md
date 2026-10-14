@@ -11,7 +11,7 @@
 ## 核心特性
 
 - **现代声明式 API**：提供基于类和装饰器（`@token`、`@rule`）的现代接口，定义清晰，语法与类型友好。
-- **平滑生态兼容**：完全兼容 PLY (`rply.compat.ply`) 与 SLY (`rply.compat.sly`)，几乎零成本迁移。
+- **平滑生态兼容**：完全兼容 PLY (`ply_rs.compat.ply`) 与 SLY (`ply_rs.compat.sly`)，几乎零成本迁移。
 - **Rust 原生加速**：词法扫描、LALR(1) 分析表生成和 LR 分析器状态机均基于 Rust 实现（通过 PyO3 绑定），消解大规模文法构表与解析开销。
 - **严格保持 Python 正则语义**：词法引擎优先使用 Rust 原生正则多模式匹配；对复杂或特殊的 Python 正则特性，自动回退到 Python `re` 匹配单规则，速度与兼容性兼得。
 - **分析表冻结（Freeze）**：支持将已计算好的分析表固化为只读快照（`frozen=True`），避免重复构表与校验，显著提升执行吞吐。
@@ -19,7 +19,7 @@
 
 ---
 
-- **分层解耦**：用户通过高层 Python API 声明文法规则，Python 适配层将结构化定义传递至 Rust 扩展模块 `rply._core_rs`。
+- **分层解耦**：用户通过高层 Python API 声明文法规则，Python 适配层将结构化定义传递至 Rust 扩展模块 `ply_rs._core_rs`。
 - **原生高速核心**：Rust 负责词法分词切片、LALR(1) 分析表计算与 LR 状态机推进，数据通过原生内存高效流转。
 - **按需双向协作**：遇到复杂正则特性时，Rust 词法引擎按需单规则调用 Python `re`；语法分析器在归约和捕获语法错误时，直接触发用户的 Python 语义动作与错误恢复。
 
@@ -34,7 +34,7 @@
 从 PyPI 安装：
 
 ```sh
-pip install rply-next
+pip install ply-rs
 ```
 
 或者从源码构建安装（需本地安装 Rust 工具链）：
@@ -49,7 +49,7 @@ maturin develop --release
 以四则运算计算器为例（完整示例见 [examples/calculator.py](examples/calculator.py)）：
 
 ```python
-from rply import Lexer, Parser, token, rule
+from ply_rs import Lexer, Parser, token, rule
 
 # 1. 定义词法分析器
 class CalculatorLexer(Lexer):
@@ -141,7 +141,7 @@ parser = MyParser(frozen=True)
 将原先的 `ply.lex` 与 `ply.yacc` 替换为：
 
 ```python
-from rply.compat.ply import lex, yacc
+from ply_rs.compat.ply import lex, yacc
 
 # 原有 t_* 规则、p_* 函数及 docstring 保持原样即可直接运行
 lexer = lex.lex()
@@ -152,7 +152,7 @@ parser = yacc.yacc()
 将原先的 `sly` 替换为：
 
 ```python
-from rply.compat.sly import Lexer, Parser, _
+from ply_rs.compat.sly import Lexer, Parser, _
 
 class CalcLexer(Lexer):
     ...
@@ -177,7 +177,7 @@ class CalcParser(Parser):
 - `LRParser` 与 `LexerEngine`：底层的独立分析器引擎驱动。
 
 ```python
-from rply import Grammar, LRTable, LRParser, LexerEngine
+from ply_rs import Grammar, LRTable, LRParser, LexerEngine
 ```
 
 ---

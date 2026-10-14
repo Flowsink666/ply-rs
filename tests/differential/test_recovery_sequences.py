@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rply import Grammar, LRParser, LRTable, Token
+from ply_rs import Grammar, LRParser, LRTable, Token
 
 
 pytestmark = pytest.mark.differential
@@ -36,7 +36,7 @@ def _grammar(terminals, rules, start, precedence=()):
 
 def _ply_action(action):
     def reduce(proxy):
-        # PLY exposes the original token as error.value; rply exposes its value.
+        # PLY exposes the original token as error.value; ply-rs exposes its value.
         for symbol in proxy.slice[1:]:
             if symbol.type == "error" and hasattr(symbol.value, "value"):
                 symbol.value = symbol.value.value
@@ -84,7 +84,7 @@ def _independent_oracle(yacc, terminals, rules, start, errors, precedence=()):
     return _ply_parser(yacc, table, errors)
 
 
-def _run_rply(parser, entries):
+def _run_ply_rs(parser, entries):
     try:
         result = parser.parse([Token(kind, value) for kind, value in entries])
     except SyntaxError:
@@ -104,7 +104,7 @@ def _statement_spec(types, *, synthetic_shift_counts):
 
     Only ID SEMI is valid. An invalid statement retains its first unexpected
     token's value, discards input through the next SEMI, then starts a new one.
-    rply requires three real shifts before its next error callback. PLY counts
+    ply-rs requires three real shifts before its next error callback. PLY counts
     the synthetic shift too, and resets suppression while discarding errors.
     """
     assert types[0] == "START"
@@ -164,11 +164,11 @@ def test_all_short_recovery_sequences_have_exact_results_and_callbacks(upstream_
             reference_expected, expected_reference_errors = _statement_spec(
                 types, synthetic_shift_counts=True
             )
-            actual = _run_rply(parser, entries)
+            actual = _run_ply_rs(parser, entries)
             reference_actual = _run_ply(reference, entries)
             trace = " ".join(types) + " $end"
             assert actual == expected == reference_actual == reference_expected, trace
-            assert errors == expected_errors, (trace, "rply callbacks", errors, expected_errors)
+            assert errors == expected_errors, (trace, "ply_rs callbacks", errors, expected_errors)
             assert reference_errors == expected_reference_errors, (
                 trace, "PLY callbacks", reference_errors, expected_reference_errors
             )
@@ -207,7 +207,7 @@ def test_independently_built_tables_preserve_recovery(upstream_ply, frozen):
         reference_expected, expected_reference_errors = _statement_spec(
             types, synthetic_shift_counts=True
         )
-        assert _run_rply(parser, entries) == expected == _run_ply(reference, entries) == reference_expected, types
+        assert _run_ply_rs(parser, entries) == expected == _run_ply(reference, entries) == reference_expected, types
         assert errors == expected_errors, types
         assert reference_errors == expected_reference_errors, types
 
@@ -233,12 +233,12 @@ def test_independent_precedence_tables_keep_numeric_gaps(upstream_ply, frozen, r
     grammar.set_start("e")
     parser = LRParser(LRTable(grammar), frozen=frozen)
     # PLY rejects repeated declarations. Supply the independently specified
-    # final numeric mapping rather than deriving it from rply's table/adapter.
+    # final numeric mapping rather than deriving it from ply-rs's table/adapter.
     reference = _independent_oracle(upstream_ply[1], {"N", "A", "B", "C"}, rules,
                                     "e", [], expected_precedence.items())
     entries = (("N", 1), ("C", "c"), ("N", 2), ("C", "c"), ("N", 3))
     expected = True, (1, (2, 3))
-    assert _run_rply(parser, entries) == expected == _run_ply(reference, entries)
+    assert _run_ply_rs(parser, entries) == expected == _run_ply(reference, entries)
 
 
 def test_precedence_redeclaration_policies_are_explicit(upstream_ply):
@@ -277,5 +277,5 @@ def test_independent_nonassoc_tables_recover_and_keep_following_statement(upstre
         ("LT", "<"), ("N", 3), ("SEMI", ";"), ("N", 4), ("SEMI", ";"),
     )
     expected = True, [("error", "<"), 4]
-    assert _run_rply(parser, entries) == expected == _run_ply(reference, entries)
+    assert _run_ply_rs(parser, entries) == expected == _run_ply(reference, entries)
     assert errors == reference_errors == ["<"]

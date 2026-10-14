@@ -1,22 +1,22 @@
 # Architecture
 
-`rply-next` is the distribution, `rply` the Python package, `rply-core` the Rust
-crate, and `rply._core_rs` its required private PyO3 extension.
+`ply-rs` is the distribution, `ply_rs` the Python package, `ply-rs-core` the Rust
+crate, and `ply_rs._core_rs` its required private PyO3 extension.
 
 ## Source layout
 
-- `src/rply/core/`: public models, grammar registration/inspection, snapshots,
+- `src/ply_rs/core/`: public models, grammar registration/inspection, snapshots,
   semantic action contexts, diagnostics, and native engine facades.
-- `src/rply/backends/`: extension loading and Python/native adapters.
-- `src/rply/modern/`: class-based lexer/parser APIs and decorators.
-- `src/rply/compat/`: PLY module and SLY class APIs.
+- `src/ply_rs/backends/`: extension loading and Python/native adapters.
+- `src/ply_rs/modern/`: class-based lexer/parser APIs and decorators.
+- `src/ply_rs/compat/`: PLY module and SLY class APIs.
 - `rust/src/`: scanning, LALR construction, parser execution, lazy reduction views
   and Python ownership.
 - `tests/`: public contracts, independent small models and upstream comparisons.
 - `benchmarks/`: shared workloads with Rust, upstream PLY and upstream SLY adapters.
 
-There is one execution engine. `RPLY_BACKEND=rust` and `auto` select it;
-`RPLY_BACKEND=python` raises ValueError. Missing extensions raise ImportError;
+There is one execution engine. `PLY_RS_BACKEND=rust` and `auto` select it;
+`PLY_RS_BACKEND=python` raises ValueError. Missing extensions raise ImportError;
 initialization failures propagate. No source-only fallback or lexer handoff exists.
 Python grammar models, production proxies and API adapters remain intentional.
 `py.typed` is included in the installed package.

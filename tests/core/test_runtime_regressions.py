@@ -5,11 +5,11 @@ from typing import Union, get_type_hints
 
 import pytest
 
-from rply import Grammar, LexerEngine, LRParser, LRTable, Token
-from rply.core.grammar import GrammarError
-from rply.core.production import ParsedSymbol, ProductionProxy
-from rply.core.tokens import LexError
-from rply.compat.ply.yacc import YaccProduction
+from ply_rs import Grammar, LexerEngine, LRParser, LRTable, Token
+from ply_rs.core.grammar import GrammarError
+from ply_rs.core.production import ParsedSymbol, ProductionProxy
+from ply_rs.core.tokens import LexError
+from ply_rs.compat.ply.yacc import YaccProduction
 
 
 def parser_for(rhs, action, action_style="auto"):

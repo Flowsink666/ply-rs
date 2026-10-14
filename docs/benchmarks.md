@@ -74,7 +74,7 @@ these workloads avoid ambiguous overlapping token patterns. All parsers enable
 position tracking, although each engine's tracking behavior and cost differ.
 The shared actions are invoked through small adapters using the public
 production APIs. PLY uses a token cursor to replay or stream tokens, SLY uses
-an iterator, and rply uses its core API rather than its compatibility wrappers.
+an iterator, and ply-rs uses its core API rather than its compatibility wrappers.
 Thus these results measure the public integration and Python callback boundary,
 not isolated native Rust operations or compatibility-wrapper overhead.
 

@@ -3,9 +3,9 @@ Unit tests for LALR(1) table construction and conflict resolution.
 """
 
 import pytest
-from rply.core.grammar import Grammar
-from rply.core.lr_table import LRTable
-from rply.core.symbols import EOF_SYMBOL
+from ply_rs.core.grammar import Grammar
+from ply_rs.core.lr_table import LRTable
+from ply_rs.core.symbols import EOF_SYMBOL
 
 
 def test_lr_table_simple_grammar():

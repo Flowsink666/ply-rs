@@ -35,7 +35,7 @@ jobs:
     needs: rust-checks
     runs-on: ${{ matrix.os }}
     env:
-      RPLY_STRICT_TESTS: "1"
+      PLY_RS_STRICT_TESTS: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -91,12 +91,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install maturin pytest
 
-      - name: Build and install rply (dev mode)
+      - name: Build and install ply-rs (dev mode)
         run: maturin develop --release --locked
 
       - name: Run pytest (Rust backend)
         env:
-          RPLY_BACKEND: rust
+          PLY_RS_BACKEND: rust
         run: python -m pytest --junitxml=reports/pytest-rust.xml
 
       - name: Upload test reports, including skip reasons
@@ -131,14 +131,14 @@ jobs:
       - name: Install wheel in a fresh virtual environment
         shell: bash
         run: |
-          python -m venv "$RUNNER_TEMP/rply-wheel-venv"
-          "$RUNNER_TEMP/rply-wheel-venv/bin/python" -m pip install --no-deps dist/*.whl
+          python -m venv "$RUNNER_TEMP/ply-rs-wheel-venv"
+          "$RUNNER_TEMP/ply-rs-wheel-venv/bin/python" -m pip install --no-deps dist/*.whl
 
       - name: Verify installed APIs outside the source checkout
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/rply-wheel-verification"
-          cp .github/scripts/verify_wheel.py "$RUNNER_TEMP/rply-wheel-verification/verify_wheel.py"
-          cd "$RUNNER_TEMP/rply-wheel-verification"
-          env -u PYTHONPATH RPLY_CHECKOUT="$GITHUB_WORKSPACE" \
-            "$RUNNER_TEMP/rply-wheel-venv/bin/python" -I verify_wheel.py --all
+          mkdir -p "$RUNNER_TEMP/ply-rs-wheel-verification"
+          cp .github/scripts/verify_wheel.py "$RUNNER_TEMP/ply-rs-wheel-verification/verify_wheel.py"
+          cd "$RUNNER_TEMP/ply-rs-wheel-verification"
+          env -u PYTHONPATH PLY_RS_CHECKOUT="$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/ply-rs-wheel-venv/bin/python" -I verify_wheel.py --all

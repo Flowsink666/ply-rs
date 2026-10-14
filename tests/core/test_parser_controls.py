@@ -2,10 +2,10 @@
 
 import pytest
 
-from rply import Grammar, LRParser, LRTable, Token
-from rply.core.production import ParserError
-from rply.compat.ply import lex, yacc
-from rply.compat import sly
+from ply_rs import Grammar, LRParser, LRTable, Token
+from ply_rs.core.production import ParserError
+from ply_rs.compat.ply import lex, yacc
+from ply_rs.compat import sly
 
 
 def test_core_errok_and_recursive_parse_use_independent_sessions():
@@ -112,7 +112,7 @@ def test_error_handler_exception_releases_recovery_session():
 
 
 def test_recovery_cursor_does_not_fetch_source_again_after_eof():
-    from rply.core.parser_context import TokenCursor
+    from ply_rs.core.parser_context import TokenCursor
 
     class Source:
         calls = 0
@@ -133,7 +133,7 @@ def test_recovery_cursor_does_not_fetch_source_again_after_eof():
 def test_native_cursor_exposes_iterator_cycles_to_gc():
     import gc
     import weakref
-    from rply.core.parser_context import TokenCursor
+    from ply_rs.core.parser_context import TokenCursor
 
     class Owner:
         pass
@@ -199,7 +199,7 @@ def test_invalid_transition_target_raises_parser_error(field):
 
 def test_generic_token_end_overflow_raises_python_exception():
     from types import SimpleNamespace
-    from rply.core.lexer_config import MAX_LEXER_COUNTER
+    from ply_rs.core.lexer_config import MAX_LEXER_COUNTER
 
     grammar = Grammar({"N"})
     grammar.add_production("s", ["N"])

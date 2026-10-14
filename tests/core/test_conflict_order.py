@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rply import Grammar, LRParser, LRTable, Token
+from ply_rs import Grammar, LRParser, LRTable, Token
 from tests.core.test_backends import run_python
 
 
@@ -53,11 +53,11 @@ def test_two_reductions_and_shift_keep_reference_choice(frozen):
 
 @pytest.mark.parametrize("mode", ["rust", "auto"])
 def test_mixed_conflict_backend_selection(mode):
-    if mode != "python" and importlib.util.find_spec("rply._core_rs") is None:
+    if mode != "python" and importlib.util.find_spec("ply_rs._core_rs") is None:
         pytest.skip("native extension unavailable")
     result = run_python(mode, r'''
 import os
-from rply import LRParser, LRTable, Token
+from ply_rs import LRParser, LRTable, Token
 from tests.core.test_conflict_order import make_conflict_grammar, EXPECTED
 
 table = LRTable(make_conflict_grammar())
