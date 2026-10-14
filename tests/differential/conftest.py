@@ -17,8 +17,8 @@ def load_reference(name):
     package = ROOT / "upstream" / name / "src" / name / "__init__.py"
     if not package.is_file():
         if os.environ.get("RPLY_STRICT_TESTS", "").lower() in {"1", "true", "yes"}:
-            pytest.fail(f"Missing required upstream/{name} reference clone; see upstream/README.md")
-        pytest.skip(f"Missing upstream/{name} reference clone; see upstream/README.md")
+            pytest.fail(f"Missing required upstream/{name} reference clone; see docs/upstream.md")
+        pytest.skip(f"Missing upstream/{name} reference clone; see docs/upstream.md")
     spec = importlib.util.spec_from_file_location(alias, package)
     module = importlib.util.module_from_spec(spec)
     sys.modules[alias] = module

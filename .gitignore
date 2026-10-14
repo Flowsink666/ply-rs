@@ -25,13 +25,18 @@ venv/
 .env.*
 !.env.example
 
-# Documentation build output
-/docs
+# Documentation build output and local development logs
+/docs/
+!/docs/architecture.md
+!/docs/development.md
+!/docs/contracts.md
+!/docs/benchmarks.md
+!/docs/upstream.md
+!/docs/README.md
 /DEVELOPMENT_LOG.md
 
 # Independently cloned upstream reference repositories
-/upstream/ply/
-/upstream/sly/
+/upstream/
 
 # Editor and operating system files
 .idea/

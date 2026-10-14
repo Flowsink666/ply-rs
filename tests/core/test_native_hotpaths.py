@@ -8,8 +8,6 @@ from functools import wraps
 import pytest
 
 from rply import Grammar, LexerEngine, LexError, LRParser, LRTable, Token
-from rply.backends.python.lexer import PythonLexerEngine
-from rply.backends.python.parser import PythonLRParser
 from rply.core.parser_context import ParseContext
 from rply.core.lexer_config import LexerConfig
 from rply.core.production import ParserError
@@ -26,9 +24,7 @@ from rply.core.table_data import ParseTableData
     ((r"a", r"ab"), "a", [("A", "a")]),
 ])
 def test_grouped_scanning_preserves_individual_regex_semantics(patterns, text, expected):
-    # Backreferences and Python-only regex syntax need the Python engine even
-    # when the surrounding suite is running with the Rust backend selected.
-    lexer = PythonLexerEngine()
+    lexer = LexerEngine()
     lexer.set_ignore("INITIAL", " ")
     for name, pattern in zip(("A", "B"), patterns):
         lexer.add_rule("INITIAL", name, pattern)
@@ -36,7 +32,7 @@ def test_grouped_scanning_preserves_individual_regex_semantics(patterns, text, e
 
 
 def test_grouped_scanning_keeps_rule_flags_local():
-    lexer = PythonLexerEngine()
+    lexer = LexerEngine()
     lexer.add_rule("INITIAL", "ASCII", r"\w+", flags=re.ASCII)
     lexer.add_rule("INITIAL", "UNICODE", r"\w+")
     lexer.set_ignore("INITIAL", " ")
@@ -46,7 +42,7 @@ def test_grouped_scanning_keeps_rule_flags_local():
 
 
 def test_global_inline_flags_do_not_leak_into_neighbor_rules():
-    lexer = PythonLexerEngine()
+    lexer = LexerEngine()
     lexer.add_rule("INITIAL", "A", r"(?i)alpha")
     lexer.add_rule("INITIAL", "B", r"beta")
     lexer.set_ignore("INITIAL", " ")
@@ -60,7 +56,7 @@ def test_global_inline_flags_keep_working_with_warnings_as_errors():
     # inside a wrapper. Original valid patterns must not gain that warning.
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
-        lexer = PythonLexerEngine()
+        lexer = LexerEngine()
         lexer.add_rule("INITIAL", "A", r"(?i)alpha")
         lexer.add_rule("INITIAL", "B", r"beta", flags=re.IGNORECASE)
         lexer.set_ignore("INITIAL", " ")
@@ -77,7 +73,7 @@ def test_global_inline_flags_keep_working_with_warnings_as_errors():
     (r"[0-9--]", "-"),
 ])
 def test_grouping_does_not_repeat_rule_validation_warnings(pattern, value):
-    lexer = PythonLexerEngine()
+    lexer = LexerEngine()
     # The caller's policy at registration applies to the original expression.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
@@ -93,14 +89,14 @@ def test_grouping_does_not_repeat_rule_validation_warnings(pattern, value):
 
 
 def test_verbose_trailing_comments_do_not_swallow_neighbor_rules():
-    lexer = PythonLexerEngine()
+    lexer = LexerEngine()
     lexer.add_rule("INITIAL", "A", "a # trailing comment", flags=re.VERBOSE)
     lexer.add_rule("INITIAL", "B", "b", flags=re.VERBOSE)
     assert [(token.type, token.value) for token in lexer.tokenize("ab")] == [("A", "a"), ("B", "b")]
 
 
-def test_fallback_rules_keep_their_order_between_grouped_rules():
-    lexer = PythonLexerEngine()
+def test_python_re_rules_keep_their_order_between_native_groups():
+    lexer = LexerEngine()
     for name, pattern in [("X", "x"), ("Y", "y"), ("PAIR", r"(a)\1"),
                           ("A", "a+"), ("B", "b")]:
         lexer.add_rule("INITIAL", name, pattern)
@@ -189,7 +185,7 @@ def test_missing_action_row_does_not_invoke_mapping_defaults():
     data.action = defaultdict(lambda: first_row, data.action)
     del data.action[0]
     with pytest.raises(SyntaxError):
-        PythonLRParser(data).parse([Token("N", 1)])
+        LRParser(data).parse([Token("N", 1)])
     assert 0 not in data.action
 
 
@@ -205,7 +201,7 @@ def test_missing_goto_still_raises_without_inventing_mapping_entries(missing):
     else:
         data.goto[0] = None
     with pytest.raises(ParserError, match="No GOTO entry"):
-        PythonLRParser(data).parse([Token("N", 1)])
+        LRParser(data).parse([Token("N", 1)])
     if missing == "outer":
         assert 0 not in data.goto
     elif missing == "inner":
@@ -220,7 +216,7 @@ def test_custom_context_keeps_its_four_argument_reduction_protocol():
             calls.append([symbol.value for symbol in popped])
             return super().reduce(production, lhs, popped, stack)
 
-    assert PythonLRParser(single_token_data()).parse([Token("N", 7)], context=Context()) == 7
+    assert LRParser(single_token_data())._runtime.parse([Token("N", 7)], context=Context()) == 7
     assert calls == [[7]]
 
 
@@ -274,19 +270,6 @@ def test_invalid_lookahead_is_checked_before_a_single_possible_reduction():
     assert calls == []
 
 
-def test_warm_scanner_observes_shared_config_updates_in_every_runtime():
-    config = LexerConfig()
-    config.add_rule("INITIAL", "WORD", "[a-z]+")
-    config.set_ignore("INITIAL", " ")
-    engines = [PythonLexerEngine(config), PythonLexerEngine(config)]
-    for lexer in engines:
-        assert [t.value for t in lexer.tokenize("warm")] == ["warm"]
-    config.set_ignore("INITIAL", " \n")
-    config.add_rule("INITIAL", "SPECIAL", "ab", priority=10)
-    for lexer in engines:
-        assert [(t.type, t.value, t.lineno, t.lexpos) for t in lexer.tokenize("\nab c")] == [
-            ("SPECIAL", "ab", 2, 1), ("WORD", "c", 2, 4),
-        ]
 
 
 def test_ignored_callback_reentry_refreshes_ignore_and_restores_scan_state():
@@ -330,83 +313,7 @@ def test_warm_inclusive_scanner_observes_new_initial_rules_and_state_kind():
         lexer.token()
 
 
-def test_ignored_string_subclass_keeps_membership_calls_and_release_timing():
-    lexer = PythonLexerEngine()
-    lexer.add_rule("INITIAL", "WORD", "[a-z]+")
-    trace = []
-
-    class Ignore(str):
-        def __contains__(self, item):
-            trace.append(item)
-            return super().__contains__(item)
-
-        def __del__(self):
-            trace.append("released")
-
-    lexer.set_ignore("INITIAL", Ignore(" "))
-    assert [t.value for t in lexer.tokenize("a b")] == ["a", "b"]
-    assert trace == ["a", " ", "b"]
-    lexer.set_ignore("INITIAL", "")
-    assert trace == ["a", " ", "b", "released"]
 
 
-def test_string_index_reentry_does_not_replace_outer_state_matchers():
-    lexer = PythonLexerEngine()
-    lexer.add_state("inner", "exclusive")
-    lexer.add_rule("INITIAL", "OUTER", "a")
-    lexer.add_rule("inner", "INNER", "b")
-    trace = []
-
-    class Source(str):
-        entered = False
-
-        def __getitem__(self, item):
-            if item == 0 and not self.entered:
-                self.entered = True
-                lexer.begin("inner")
-                lexer.pos = 1
-                trace.append(lexer.token().type)
-                lexer.begin("INITIAL")
-            return super().__getitem__(item)
-
-    lexer.input(Source("ab"))
-    outer = lexer.token()
-    assert (outer.type, outer.value, outer.lexpos) == ("OUTER", "a", 0)
-    assert trace == ["INNER"]
-    lexer.begin("inner")
-    assert lexer.token().type == "INNER"
 
 
-def test_reduction_symbol_factory_keeps_call_shape_and_metadata_read_order(monkeypatch):
-    import rply.backends.python.parser as parser_module
-
-    original = parser_module.ParsedSymbol
-    shifted = []
-    calls = []
-
-    def factory(*args, **kwargs):
-        calls.append((args, kwargs))
-        symbol = original(*args, **kwargs)
-        if args[0] == "N":
-            shifted.append(symbol)
-        elif args[0] == "s":
-            # Metadata must be read after construction: a custom constructor
-            # can inspect and update symbols made earlier in the same parse.
-            assert args == ("s",) and kwargs == {}
-            shifted[0].value = 9
-            shifted[0].lineno = 3
-            shifted[0].endlineno = 4
-            shifted[0].lexpos = 5
-            shifted[0].endlexpos = 6
-        return symbol
-
-    saved = []
-    grammar = Grammar({"N"})
-    grammar.add_production("s", ["N"], lambda p: saved.append(p))
-    grammar.set_start("s")
-    monkeypatch.setattr(parser_module, "ParsedSymbol", factory)
-    parser = PythonLRParser(ParseTableData.from_table(LRTable(grammar)))
-    assert parser.parse([Token("N", 7)]) == 9
-    assert saved[0].linespan(0) == (3, 4)
-    assert saved[0].lexspan(0) == (5, 6)
-    assert sum(args[0] == "s" for args, kwargs in calls) == 1

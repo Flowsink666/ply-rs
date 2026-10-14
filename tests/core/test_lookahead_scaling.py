@@ -2,10 +2,9 @@
 
 import pytest
 
-from rply.backends.python.lr_table import PythonLRTable
-from rply.backends.python.parser import PythonLRParser
 from rply.core.diagnostics import DiagnosticsFormatter
 from rply.core.grammar import Grammar
+from rply import LRTable, LRParser
 from rply.core.symbols import EOF_SYMBOL
 from rply.core.table_data import ParseTableData
 from rply.core.tokens import Token
@@ -46,7 +45,7 @@ def test_shared_reduction_merges_overlapping_lookbacks_in_order(width):
             )
     grammar.add_production("item", ["VALUE"], lambda value: value, action_style="values")
     grammar.set_start("s")
-    table = PythonLRTable(grammar)
+    table = LRTable(grammar)
 
     # Every prefix reaches the same item -> VALUE reduction. Its lookbacks
     # contribute the same suffixes repeatedly, in grammar declaration order.
@@ -63,7 +62,7 @@ def test_shared_reduction_merges_overlapping_lookbacks_in_order(width):
         assert table.action[prefix_state]["VALUE"] == reduction_state
     assert table.conflicts == []
 
-    parser = PythonLRParser(ParseTableData.from_table(table))
+    parser = LRParser(ParseTableData.from_table(table))
     for prefix in (prefixes[0], prefixes[-1]):
         for suffix in suffixes:
             assert parser.parse([
@@ -86,7 +85,7 @@ def conflicting_grammar():
 
 def test_lookback_merging_preserves_action_goto_and_conflict_diagnostics():
     grammar = conflicting_grammar()
-    table = PythonLRTable(grammar)
+    table = LRTable(grammar)
     initial = ((0, 0), (1, 0), (2, 0), (3, 0), (4, 0))
     a_state = ((1, 1), (3, 1), (5, 0), (6, 0))
     b_state = ((2, 1), (4, 1), (5, 0), (6, 0))
@@ -129,7 +128,7 @@ def test_lookback_merging_preserves_action_goto_and_conflict_diagnostics():
         )
     assert DiagnosticsFormatter.format_conflicts(table) == expected[:-1]
 
-    parser = PythonLRParser(ParseTableData.from_table(table))
+    parser = LRParser(ParseTableData.from_table(table))
     for text in ("acd", "bce"):
         assert parser.parse([Token(char, char) for char in text]) == text[0]
     for text in ("ace", "bcd"):
@@ -139,14 +138,14 @@ def test_lookback_merging_preserves_action_goto_and_conflict_diagnostics():
 
 def test_rebuilding_grammar_keeps_existing_lookahead_lists():
     grammar = conflicting_grammar()
-    first = PythonLRTable(grammar)
+    first = LRTable(grammar)
     original = [dict(production.lookaheads) for production in grammar.Productions]
     original_values = [
         {state: list(values) for state, values in production.lookaheads.items()}
         for production in grammar.Productions
     ]
 
-    second = PythonLRTable(grammar)
+    second = LRTable(grammar)
     assert second.action == first.action
     assert second.goto == first.goto
     assert DiagnosticsFormatter.format_conflicts(second) == DiagnosticsFormatter.format_conflicts(first)
@@ -154,3 +153,29 @@ def test_rebuilding_grammar_keeps_existing_lookahead_lists():
         assert production.lookaheads == values
         for state, lookaheads in production.lookaheads.items():
             assert lookaheads is previous[state]
+
+
+@pytest.mark.parametrize("recursive", [False, True])
+def test_advanced_items_do_not_inherit_a_different_nonterminal_transitions_follow(recursive):
+    grammar = Grammar({"a", "b"})
+    grammar.add_production("s", ["A"], line=1)
+    grammar.add_production("A", ["a"], line=2)
+    grammar.add_production("B", ["b"], line=3)
+    grammar.add_production("s", ["a", "A", "B"], line=4)
+    grammar.add_production("B", [], line=5)
+    if recursive:
+        grammar.add_production("A", ["A"], line=6)
+    grammar.set_start("s")
+    table = LRTable(grammar)
+    after_first_a = table.action[0]["a"]
+    # A -> a . here completes s -> A and can only reduce on EOF. The
+    # simultaneous transition for s -> a . A B must not donate B's FIRST set
+    # to that completed item; it belongs to a newly started A production.
+    assert "A" in table.goto[after_first_a]
+    assert grammar.Productions[2].lookaheads[after_first_a] == [EOF_SYMBOL]
+    assert "b" not in table.action[after_first_a]
+    parser = LRParser(table)
+    for text in ("a", "aa", "aab"):
+        assert parser.parse([Token(character, character) for character in text]) == "a"
+    with pytest.raises(SyntaxError):
+        parser.parse([Token(character, character) for character in "ab"])

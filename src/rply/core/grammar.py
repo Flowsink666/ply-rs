@@ -390,3 +390,68 @@ class Grammar:
                         f"Rule {p.name!r} contains unknown symbol {sym!r} at {p.file}:{p.line}"
                     )
         return warnings
+
+
+def digraph(
+    X: List[Any],
+    R: Callable[[Any], List[Any]],
+    FP: Callable[[Any], List[str]],
+) -> Dict[Any, List[str]]:
+    """
+    Compute transitive closure of set-valued functions of the form:
+        F(x) = F'(x) U U{F(y) | x R y}
+    Used in LALR(1) to compute Read sets and Follow sets.
+    """
+    N: Dict[Any, int] = {x: 0 for x in X}
+    stack: List[Any] = []
+    F: Dict[Any, List[str]] = {}
+    F_set: Dict[Any, Set[str]] = {}
+    frames: List[Tuple[Any, int, Any]] = []
+
+    def enter(x: Any) -> None:
+        stack.append(x)
+        d = len(stack)
+        N[x] = d
+        initial = list(FP(x))
+        F[x] = initial
+        F_set[x] = set(initial)
+        frames.append((x, d, iter(R(x))))
+
+    def propagate(x: Any, y: Any) -> None:
+        N[x] = min(N[x], N[y])
+        fx = F[x]
+        fx_set = F_set[x]
+        for a in F[y]:
+            if a not in fx_set:
+                fx_set.add(a)
+                fx.append(a)
+
+    for x in X:
+        if N[x] != 0:
+            continue
+        enter(x)
+        # Keep suspended edge iterators separate from the component stack.
+        # A child's labels propagate only after its traversal has completed.
+        while frames:
+            node, depth, successors = frames[-1]
+            try:
+                child = next(successors)
+            except StopIteration:
+                if N[node] == depth:
+                    while True:
+                        elem = stack.pop()
+                        N[elem] = 0x7FFFFFFF
+                        F[elem] = F[node]
+                        F_set[elem] = F_set[node]
+                        if elem == node:
+                            break
+                frames.pop()
+                if frames:
+                    propagate(frames[-1][0], node)
+            else:
+                if N.get(child, 0) == 0:
+                    enter(child)
+                else:
+                    propagate(node, child)
+
+    return F

@@ -86,22 +86,14 @@ def benchmark(mode, repeat, iterations):
 
 def main():
     args = argparse.ArgumentParser(description=__doc__)
-    args.add_argument("--backend", choices=["python", "rust", "both"], default="both")
+    args.add_argument("--backend", choices=["rust", "auto"], default="rust")
     args.add_argument("--repeat", type=int, default=5)
     args.add_argument("--iterations", type=int, default=20)
     args.add_argument("--output", type=Path)
     options = args.parse_args()
     if options.repeat < 1 or options.iterations < 1:
         args.error("repeat and iterations must be positive")
-    if options.backend == "both":
-        results = {}
-        for mode in ["python", "rust"]:
-            command = [sys.executable, str(Path(__file__).resolve()), "--backend", mode,
-                       "--repeat", str(options.repeat), "--iterations", str(options.iterations)]
-            result = subprocess.run(command, check=True, capture_output=True, text=True)
-            results.update(json.loads(result.stdout)["results"])
-    else:
-        results = {options.backend: benchmark(options.backend, options.repeat, options.iterations)}
+    results = {"rust": benchmark(options.backend, options.repeat, options.iterations)}
     report = {
         "python": sys.version, "platform": platform.platform(),
         "repeat": options.repeat, "iterations": options.iterations, "results": results,

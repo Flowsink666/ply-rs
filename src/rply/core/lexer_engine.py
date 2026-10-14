@@ -3,9 +3,7 @@
 from collections.abc import MutableSequence
 from typing import Any, Callable, Iterator, Optional, Sequence, Union
 
-from rply.backends import HAS_RUST_CORE, fallback, native_core
-from rply.backends.interfaces import LexerRuntime
-from rply.backends.python.lexer import PythonLexerEngine
+from rply.backends import native_core
 from rply.backends.rust_lexer import RustLexerRuntime
 from rply.core.lexer_config import LexerConfig, LexerSnapshot, lexer_counter
 from rply.core.tokens import LexError, LexRule, Token
@@ -54,17 +52,8 @@ class _StateStackView(MutableSequence):
 class LexerEngine:
     def __init__(self):
         self._config = LexerConfig()
-        self._runtime: LexerRuntime
-        self.backend = "python"
-        if HAS_RUST_CORE:
-            try:
-                self._runtime = RustLexerRuntime(native_core, self)
-            except Exception as error:
-                fallback("lexer", error)
-            else:
-                self.backend = "rust"
-                return
-        self._runtime = PythonLexerEngine(self._config, callback_owner=self)
+        self.backend = "rust"
+        self._runtime = RustLexerRuntime(native_core, self)
 
     @property
     def states(self):
@@ -142,25 +131,9 @@ class LexerEngine:
 
     def _configure(self, method: str, *args: Any) -> None:
         change = self._config.prepare(method, *args)
-        if self.backend != "rust":
-            self._config.apply(change)
-            return
-        try:
-            self._runtime.configure(method, *change.args)
-        except Exception as error:
-            fallback("lexer", error)
-            previous_runtime = self._runtime
-            state = self.capture_state()
-            replacement = PythonLexerEngine(self._config, callback_owner=self)
-            replacement.restore_state(state)
-            # Moving the same input to another runtime is not a new input.
-            replacement.input_revision = previous_runtime.input_revision
-            self._config.apply(change)
-            self._runtime = replacement
-            self.backend = "python"
-            previous_runtime.retire()
-        else:
-            self._config.apply(change)
+        self._runtime.configure(method, *change.args,
+                                **({"compiled": change.rule.compiled} if change.rule is not None else {}))
+        self._config.apply(change)
 
     def add_state(self, name: str, kind: str = "inclusive") -> None:
         self._configure("add_state", name, kind)
@@ -198,11 +171,7 @@ class LexerEngine:
         self.pos += n
 
     def token(self) -> Optional[Token]:
-        while True:
-            runtime = self._runtime
-            token = runtime.token()
-            if token is not None or self._runtime is runtime:
-                return token
+        return self._runtime.token()
 
     def tokenize(self, text: Optional[str] = None) -> Iterator[Token]:
         if text is not None:

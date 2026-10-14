@@ -1,7 +1,7 @@
 """Public parse table facade over backend-neutral build results."""
 
-from rply.backends import HAS_RUST_CORE, fallback, native_core
-from rply.backends.python.lr_table import build_table as build_python_table, digraph
+from rply.backends import native_core
+from rply.core.grammar import digraph
 from rply.backends.rust import build_table
 from rply.core.conflicts import ConflictRecord
 
@@ -9,17 +9,8 @@ from rply.core.conflicts import ConflictRecord
 class LRTable:
     def __init__(self, grammar):
         self.grammar = grammar
-        self.backend = "python"
-        result = None
-        if HAS_RUST_CORE:
-            try:
-                result = build_table(grammar, native_core)
-            except Exception as error:
-                fallback("table builder", error)
-            else:
-                self.backend = "rust"
-        if result is None:
-            result = build_python_table(grammar)
+        self.backend = "rust"
+        result = build_table(grammar, native_core)
         self.action = result.data.action
         self.goto = result.data.goto
         self.productions = result.data.productions

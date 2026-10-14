@@ -9,24 +9,24 @@ the release extension and measuring it (activate a virtual environment first):
 
 ```sh
 python -m maturin develop --release
-python benchmarks/suite.py --engine python rust ply sly --output target/benchmarks/suite-current.json
+python benchmarks/suite.py --engine rust ply sly --output target/benchmarks/suite-current.json
 ```
 
 PLY/SLY are optional. The suite prefers the pinned clones described in
-[upstream/README.md](../upstream/README.md); if a clone is missing, it uses the
+[docs/upstream.md](upstream.md); if a clone is missing, it uses the
 installed `ply` or `sly` package. It records the chosen source path, version,
 and local clone revision. A requested engine that is unavailable fails with
 an error instead of disappearing from the comparison. With no `--engine`
-argument, only rply's Python and Rust backends run.
+argument, only the native Rust engine runs.
 
-For source-only development, a quick validation, or a focused measurement:
+For a quick validation or a focused measurement after building the extension:
 
 ```sh
-python benchmarks/suite.py --engine python
-python benchmarks/suite.py --engine python rust ply sly --size 3 --check
+python benchmarks/suite.py --engine rust
+python benchmarks/suite.py --engine rust ply sly --size 3 --check
 python benchmarks/suite.py --engine rust ply sly --case json json-unicode --repeat 7 --iterations 10
-python benchmarks/suite.py --engine python rust --case wide-grammar --grammar-width 128 --size 2000
-python benchmarks/suite.py --engine python rust --case nested --size 4096 --operation parse
+python benchmarks/suite.py --engine rust --case wide-grammar --grammar-width 128 --size 2000
+python benchmarks/suite.py --engine rust --case nested --size 4096 --operation parse
 ```
 
 | Workload | Default input | What it exercises |
@@ -90,10 +90,10 @@ startup are not measured by this suite.
 Run from the repository root with the native extension built and available:
 
 ```sh
-python benchmarks/run.py --backend both --repeat 5 --iterations 20 --output target/benchmarks/current.json
+python benchmarks/run.py --backend rust --repeat 5 --iterations 20 --output target/benchmarks/current.json
 ```
 
-Use `--backend python` for source-only development. Explicit Rust mode fails if
+The native extension is required. Explicit Rust mode fails if
 the extension is unavailable or a native setup error occurs. Each backend runs
 in a separate process, with the same grammar, text, and iteration counts.
 
@@ -189,6 +189,10 @@ adaptation. Python token creation, iteration, and proxy-style callbacks remain.
 Sequential timings are subject to background load and do not isolate each
 optimization.
 
+> Historical measurements below describe the removed Python reference engine.
+> They are retained as research records; current benchmark commands select
+> Rust, upstream PLY, or upstream SLY.
+
 ## Python scanner and parser pass, 2026-10-14
 
 Windows 11, Intel Core i7-11800H, CPython 3.14.7. The comparison loads saved
@@ -235,9 +239,9 @@ and auto. Python 3.9 additionally passes the inline-flags warning contract and
 the six-workload, four-engine correctness check.
 
 Local reports and raw samples are in
-`target/benchmarks/ply-optimization-2026-10-14.md`,
-`ply-optimization-paired-2026-10-14.json`, and
-`ply-optimization-matrix-2026-10-14.json`. Saved pre-edit sources and the
+`docs/benchmarks/ply-optimization-2026-10-14.md`,
+`target/benchmarks/ply-optimization-paired-2026-10-14.json`, and
+`target/benchmarks/ply-optimization-matrix-2026-10-14.json`. Saved pre-edit sources and the
 comparison script are in the same ignored benchmark directory.
 
 Follow-up semantic checks keep ambiguous nested-set/set-operation expressions
@@ -247,7 +251,7 @@ instrumented reduction hooks retain four arguments and RHS-only symbols.
 Normal-path cProfile call counts remain 7,000 regex matches for the wide workload
 and 19,000 dictionary `get` calls for arithmetic parsing. This follow-up checked
 call counts, not a new before/after timing ratio. Details and regression evidence
-are in `target/semantics-audit-2026-10-14.md`.
+are in `docs/reviews/semantics-audit-2026-10-14.md`.
 
 The next scanning pass caches the current state's matchers and ignored characters
 for ordinary strings. State setters invalidate the cache; a separate shared scan
@@ -264,7 +268,7 @@ control. The initial cache candidate had negligible benefit and was simplified;
 the separately tested guarded symbol-construction candidate was slower and was
 not adopted. Raw trials, source snapshots, and scripts are under
 `target/benchmarks/scan-cache-*`; details are in
-`target/benchmarks/scan-cache-2026-10-14.md`.
+`docs/benchmarks/scan-cache-2026-10-14.md`.
 
 Pooling the two final trials gives equal-weight geometric mean ratios of 1.026x
 for scanning and 1.023x end-to-end. The unchanged parser measures 0.991x, showing
@@ -291,7 +295,7 @@ outside timing. Six default proxy workloads plus arithmetic/JSON value actions
 in dynamic/frozen mode have independent output and token-position checks. Reports,
 raw samples, saved source/binaries, and the comparison script are under
 `target/benchmarks/rust-reduction-*`; the summary is
-`target/benchmarks/rust-reduction-2026-10-14.md`.
+`docs/benchmarks/rust-reduction-2026-10-14.md`.
 
 Two final trials pool 16 samples per version/operation, reconstructing runtimes
 per ABBA block to average native HashMap layout differences. Equal-weight ratios
@@ -303,3 +307,76 @@ The initial experimental single-list candidate changed finalizer/slice release
 timing and is excluded from final measurements. Final checks: Python 565 passed
 plus ten declared skips, Rust 575 passed, Cargo 12 passed, strict Clippy/rustfmt
 passed, and isolated Python/Rust/auto wheel verification passes 22 groups each.
+
+
+## Native-only engine migration, 2026-10-14
+
+Windows, CPython 3.14.7, release builds. The saved pre-migration and final
+reports use identical workloads, one warm-up, three repeats and three operations
+per repeat. Input, token and result checksums agree for every workload. These
+sequential observations include all compatibility/API changes and do not isolate
+individual optimizations; small differences are subject to background load.
+
+| Workload | Scan before/after (ms) | Parse before/after (ms) | End-to-end before/after (ms) | Build before/after (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| arithmetic | 3.916 / 2.788 | 23.190 / 21.042 | 28.697 / 24.183 | 0.297 / 0.502 |
+| nested | 0.346 / 0.462 | 3.413 / 3.393 | 3.924 / 3.394 | 0.334 / 0.569 |
+| json | 8.622 / 6.482 | 19.704 / 18.058 | 28.661 / 25.806 | 1.159 / 1.741 |
+| json-unicode | 8.610 / 6.917 | 18.259 / 16.974 | 26.043 / 25.258 | 1.156 / 2.292 |
+| mini-language | 2.433 / 1.484 | 12.493 / 11.239 | 14.820 / 13.112 | 0.500 / 1.027 |
+| wide-grammar | 12.729 / 2.577 | 6.523 / 5.605 | 19.930 / 8.228 | 8.473 / 13.397 |
+
+Native multi-pattern plans accelerate wide rule sets. ASCII-only input plans
+avoid unnecessary Python matching while Unicode sources retain Python regex
+semantics. Parsed literal prefixes filter unmatched Python candidates. Shared
+native token cursors avoid adding a Python forwarding frame per token; compact
+u32 table rows and Arc symbol names reduce parsing lookup/allocation work.
+
+Full table diagnostics and regex translation add construction work. Reuse built
+lexer/parser instances and freeze static parsers; these measurements do not claim
+that every workload or startup phase improved. Local raw reports are
+`target/backend-removal-baseline.json` and `target/backend-removal-after.json`.
+
+## Lazy native reduction views, 2026-10-14
+
+Windows 11, CPython 3.14.7, native release builds. This comparison starts with
+the native-only engine immediately before lazy reduction views. Saved baseline
+and final packages run in separate isolated processes, using two interleaved
+before/after/after/before cycles. Each operation has two warm-ups and five
+samples of five invocations per process, giving 20 samples per version and
+operation. GC remains enabled. Input, token values/positions/lines, parse results
+and state counts agree across every run.
+
+These are the six default proxy-action workloads, with editable parsers and
+position tracking. Public indexing methods retain their type annotations.
+Times are median milliseconds per operation; ratios express throughput gains.
+
+| Workload | Parse before | Parse after | Parse ratio | End-to-end before | End-to-end after | End-to-end ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| arithmetic | 21.031 | 16.572 | 1.27x | 24.288 | 20.658 | 1.18x |
+| nested | 2.845 | 2.256 | 1.26x | 3.160 | 2.603 | 1.21x |
+| json | 16.206 | 13.491 | 1.20x | 24.148 | 20.678 | 1.17x |
+| json-unicode | 16.959 | 13.308 | 1.27x | 26.396 | 22.686 | 1.16x |
+| mini-language | 12.035 | 9.536 | 1.26x | 13.935 | 12.328 | 1.13x |
+| wide-grammar | 5.928 | 4.887 | 1.21x | 8.879 | 8.153 | 1.09x |
+
+Equal-weight geometric mean ratios are 1.246x for parsing and 1.156x end-to-end.
+The final extension matches the installed wheel's SHA-256. Local raw samples,
+checksums and settings are in `target/native_proxy_abba.json`; its comparison
+script is `target/native_proxy_abba.py`. The pre-edit source and binary snapshot
+is under `target/native-proxy-baseline/`. These ignored artifacts preserve the
+local comparison; CPU frequency and background load still affect timings.
+The run measures warm parsing, not peak memory, error-heavy inputs or cold starts.
+
+Ordinary proxy actions now read and write values through detached native records.
+Python symbol objects and a real RHS list are created only when an action inspects
+`p.slice`, value slices or positions. The action path skips the Python reducer
+and proxy initializer while retaining one Python frame for traceback ownership.
+Every reduction retains a distinct public proxy; materialized slices stay mutable.
+Constructor customization and reduction hooks use the materialized callback
+protocol. Value-style actions keep their direct invocation path.
+
+Validation: 654 strict Python tests pass without skips, 13 Cargo tests pass,
+Clippy and rustfmt pass, and all 18 Rust/PLY/SLY workload checks agree. A fresh
+environment outside the checkout verifies 26 installed-wheel contract groups
+under each of `rust` and `auto`, including saved views and reference lifetimes.

@@ -233,9 +233,9 @@ with warnings.catch_warnings():
     warnings.simplefilter('error', RuntimeWarning)
     try:
         if FLAGS_FAILURE:
-            lexer.add_rule('new', 'BAD', 'a', flags=re.ASCII)
+            lexer.add_rule('new', 'BAD', 'a', flags=re.ASCII | re.UNICODE)
         else:
-            lexer.add_rule('new', 'BAD', r'(?=a)a')
+            lexer.add_rule('new', 'BAD', r'(')
     except ERROR_TYPE:
         pass
     else:
@@ -252,13 +252,13 @@ else:
     raise AssertionError('native configuration was partially committed')
 assert lexer.token().value == '12'
 '''.replace("FLAGS_FAILURE", str(flags_failure)).replace(
-        "ERROR_TYPE", "RuntimeError" if mode == "rust" else "RuntimeWarning")
+        "ERROR_TYPE", "(re.error, ValueError)")
     result = run_python(mode, source)
     assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("from_error", [False, True])
-def test_input_replaced_after_callback_fallback_is_not_skipped(from_error):
+def test_input_replaced_after_callback_registration_is_not_skipped(from_error):
     if importlib.util.find_spec("rply._core_rs") is None:
         pytest.skip("native extension unavailable")
     source = r'''
@@ -279,7 +279,7 @@ with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')
     result = list(lexer.tokenize('@12'))
 assert [(t.value, t.lexpos) for t in result] == [('abc', 0)]
-assert lexer.backend == 'python' and len(calls) == 1 and len(caught) == 1
+assert lexer.backend == 'rust' and len(calls) == 1 and len(caught) == 0
 '''.replace("FROM_ERROR", str(from_error))
     result = run_python("auto", source)
     assert result.returncode == 0, result.stderr
@@ -299,7 +299,7 @@ def test_clearing_error_handler_and_rejected_literals_leave_valid_configuration(
         lexer.token()
 
 
-def test_failed_handoff_preparation_preserves_selected_runtime_and_definitions(monkeypatch):
+def test_failed_native_setup_preserves_runtime_and_definitions(monkeypatch):
     lexer = make_lexer()
     if lexer.backend != "rust":
         pytest.skip("native handoff preparation test")
@@ -312,8 +312,7 @@ def test_failed_handoff_preparation_preserves_selected_runtime_and_definitions(m
     def broken(*args, **kwargs):
         raise failure
 
-    monkeypatch.setattr(backends, "BACKEND", "auto")
-    monkeypatch.setattr(lexer_module, "PythonLexerEngine", broken)
+    monkeypatch.setattr(lexer._runtime, "configure", broken)
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
         with pytest.raises(ValueError) as caught:

@@ -43,6 +43,24 @@ def build_table(grammar, module) -> TableBuildResult:
 
     rs_g.set_start(grammar.start)
     rs_table = rs_g.build_table()
+    grammar.build_lritems()
+    grammar.First = rs_g.first
+    grammar.Follow = rs_g.follow
+    lookaheads = [{} for _ in grammar.Productions]
+    for (state, number), values in rs_table.lookaheads.items():
+        lookaheads[number][state] = values
+    for production, current in zip(grammar.Productions, lookaheads):
+        for state in list(production.lookaheads):
+            if state not in current:
+                del production.lookaheads[state]
+        for state, values in current.items():
+            production.lookaheads.setdefault(state, [])[:] = values
+        production.reduced = 0
+    action = rs_table.action
+    for row in action.values():
+        for value in row.values():
+            if value is not None and value < 0:
+                grammar.Productions[-value].reduced += 1
 
     rr_conflicts = []
     for st, c1, c2 in rs_table.rr_conflicts:
@@ -56,13 +74,16 @@ def build_table(grammar, module) -> TableBuildResult:
                 state=int(c["state"]),
                 token=c["token"],
                 resolution=c["resolution"],
-                candidates=[],
+                candidates=[grammar.Productions[number] if c["kind"] == "reduce/reduce"
+                            else grammar.Productions[number].lr_items[dot]
+                            for number, dot in c["candidates"]],
                 reason=c["reason"],
             )
         )
 
     data = ParseTableData(
-        rs_table.action, rs_table.goto, grammar.Productions,
-        [[] for _ in range(rs_table.num_states)], conflicts, rs_table.sr_conflicts, rr_conflicts,
+        action, rs_table.goto, grammar.Productions,
+        [[grammar.Productions[number].lr_items[dot] for number, dot in state]
+         for state in rs_table.states], conflicts, rs_table.sr_conflicts, rr_conflicts,
     )
     return TableBuildResult(data, RustTableArtifact(module, rs_table, data))

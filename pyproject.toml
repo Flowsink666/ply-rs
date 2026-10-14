@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "rply-next"
 version = "0.1.0"
-description = "Modern successor to PLY and SLY with pure-Python reference engine and modern APIs"
+description = "Modern successor to PLY and SLY with a native Rust engine and Python APIs"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
@@ -39,7 +39,6 @@ include = [
     { path = "tests/**/*", format = "sdist" },
     { path = "examples/**/*", format = "sdist" },
     { path = "docs/**/*", format = "sdist" },
-    { path = "upstream/README.md", format = "sdist" },
     { path = ".github/scripts/verify_wheel.py", format = "sdist" },
 ]
 exclude = ["**/__pycache__/**", "**/*.pyc", "upstream/ply/**", "upstream/sly/**"]

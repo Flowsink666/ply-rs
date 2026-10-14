@@ -37,36 +37,10 @@ importlib.import_module = blocked
 """
 
 
-@pytest.mark.parametrize("mode", ["auto", "python"])
-def test_missing_extension_uses_python(mode):
-    result = run_python(mode, BLOCK_EXTENSION + r"""
-from rply import Grammar, LexerEngine, LRParser, LRTable, Token
-lexer = LexerEngine()
-lexer.add_rule('INITIAL', 'NUMBER', r'\d+')
-assert [t.value for t in lexer.tokenize('42')] == ['42']
-grammar = Grammar({'NUMBER'})
-grammar.add_production('expr', ['NUMBER'], func=lambda p: p[1])
-grammar.set_start('expr')
-table = LRTable(grammar)
-parser = LRParser(table)
-assert lexer.backend == table.backend == parser.backend == 'python'
-assert parser.parse([Token('NUMBER', 42)]) == 42
-""")
-    assert result.returncode == 0, result.stderr
 
 
-def test_explicit_python_does_not_import_native_extension():
-    result = run_python("python", BLOCK_EXTENSION.replace(
-        "raise ImportError('extension deliberately unavailable')",
-        "raise AssertionError('Python mode attempted to load Rust')",
-    ) + "from rply import LexerEngine; assert LexerEngine().backend == 'python'")
-    assert result.returncode == 0, result.stderr
 
 
-def test_explicit_rust_requires_extension():
-    result = run_python("rust", BLOCK_EXTENSION + "import rply")
-    assert result.returncode != 0
-    assert "RPLY_BACKEND=rust requires" in result.stderr
 
 
 def test_invalid_backend_is_rejected():
@@ -75,23 +49,6 @@ def test_invalid_backend_is_rejected():
     assert "RPLY_BACKEND must be" in result.stderr
 
 
-@pytest.mark.parametrize("mode", ["auto", "rust"])
-def test_native_setup_failure_obeys_policy(monkeypatch, mode):
-    def broken():
-        raise ValueError("native setup failed")
-
-    monkeypatch.setattr(backends, "BACKEND", mode)
-    monkeypatch.setattr(lexer_module, "HAS_RUST_CORE", True)
-    monkeypatch.setattr(lexer_module, "native_core", SimpleNamespace(LexerEngine=broken))
-    if mode == "rust":
-        with pytest.raises(RuntimeError, match="Rust lexer initialization failed"):
-            LexerEngine()
-    else:
-        with pytest.warns(RuntimeWarning, match="native setup failed"):
-            lexer = LexerEngine()
-        lexer.add_rule("INITIAL", "NUMBER", r"\d+")
-        assert lexer.backend == "python"
-        assert next(lexer.tokenize("42")).value == "42"
 
 
 def test_runtime_action_error_is_not_replayed():
@@ -110,26 +67,44 @@ def test_runtime_action_error_is_not_replayed():
     assert calls == [42]
 
 
+
+
 @pytest.mark.parametrize("mode", ["auto", "rust"])
-def test_unsupported_native_regex_flag_obeys_policy(mode):
-    if importlib.util.find_spec("rply._core_rs") is None:
-        pytest.skip("native extension unavailable")
-    source = r'''
+def test_native_extension_is_required_in_both_modes(mode):
+    result = run_python(mode, BLOCK_EXTENSION + "import rply")
+    assert result.returncode != 0
+    assert "rply requires the rply._core_rs native extension" in result.stderr
+
+
+def test_removed_python_backend_is_rejected_before_extension_loading():
+    result = run_python("python", BLOCK_EXTENSION + "import rply")
+    assert result.returncode != 0
+    assert "RPLY_BACKEND=python is no longer supported" in result.stderr
+
+
+def test_native_setup_failure_propagates_without_downgrade(monkeypatch):
+    failure = ValueError("native setup failed")
+    def broken():
+        raise failure
+    monkeypatch.setattr(lexer_module, "native_core", SimpleNamespace(LexerEngine=broken))
+    with pytest.raises(ValueError) as caught:
+        LexerEngine()
+    assert caught.value is failure
+
+
+@pytest.mark.parametrize("mode", ["auto", "rust"])
+def test_regex_compatibility_does_not_change_selected_backend(mode):
+    result = run_python(mode, r'''
 import re
 import warnings
 from rply import LexerEngine
 engine = LexerEngine()
-assert engine.backend == 'rust'
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')
+    engine.add_rule('INITIAL', 'PAIR', r'(a)\1')
     engine.add_rule('INITIAL', 'WORD', r'\w+', flags=re.ASCII)
-assert engine.backend == 'python'
-assert any('Unsupported Python regex flags' in str(w.message) for w in caught)
-assert next(engine.tokenize('abc')).value == 'abc'
-'''
-    result = run_python(mode, source)
-    if mode == "auto":
-        assert result.returncode == 0, result.stderr
-    else:
-        assert result.returncode != 0
-        assert "Unsupported Python regex flags" in result.stderr
+assert engine.backend == 'rust' and not caught
+assert next(engine.tokenize('aa')).type == 'PAIR'
+assert next(engine.tokenize('abc')).type == 'WORD'
+''')
+    assert result.returncode == 0, result.stderr

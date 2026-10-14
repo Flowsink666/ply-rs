@@ -2,29 +2,8 @@
 
 from benchmarks.workloads import wide_grammar
 from rply import Grammar, LRParser, LRTable, Token
-from rply.backends.python.lr_table import PythonLRTable
 
 
-def test_wide_table_state_key_work_tracks_output_size(monkeypatch):
-    workload = wide_grammar(1, 256)
-    grammar = Grammar({token.name for token in workload.tokens})
-    for rule in workload.rules:
-        grammar.add_production(rule.name, rule.rhs.split())
-    grammar.set_start(workload.start)
-    encoded_items = 0
-    original_key = PythonLRTable._state_key
-
-    def counted_key(items):
-        nonlocal encoded_items
-        encoded_items += len(items)
-        return original_key(items)
-
-    monkeypatch.setattr(PythonLRTable, "_state_key", staticmethod(counted_key))
-    table = PythonLRTable(grammar)
-    output_items = sum(len(state) for state in table.states)
-    # An operation-count budget avoids timing noise. Re-encoding every wide
-    # source state for each outgoing token exceeds this by more than 10x.
-    assert encoded_items <= 4 * output_items
 
 
 def test_wide_grammar_repeated_parse_keeps_reachable_transitions():
@@ -59,7 +38,7 @@ def test_shared_transition_preserves_public_lookahead_and_conflict_order(monkeyp
     # State discovery uses symbol sets. Pin their iteration order so this
     # regression checks the ordering produced by the original builder.
     monkeypatch.setenv("PYTHONHASHSEED", "0")
-    result = run_python("python", r'''
+    result = run_python("rust", r'''
 from rply import Grammar, LRParser, LRTable
 
 grammar = Grammar({'t0', 't1', 't2'})
@@ -76,7 +55,7 @@ for line, (name, rhs) in enumerate(rules):
     grammar.add_production(name, rhs, line=line)
 grammar.set_start('s')
 table = LRTable(grammar)
-assert table.backend == 'python'
+assert table.backend == 'rust'
 state = next(
     index for index, items in enumerate(table.states)
     if {(item.production.number, item.lr_index) for item in items}
@@ -91,3 +70,16 @@ assert table.action[state]['t0'] == table.action[state]['t2'] == -3
 assert LRParser(table).parse([]) is None
 ''')
     assert result.returncode == 0, result.stderr
+
+
+def test_wide_table_exposes_deterministic_unique_item_states():
+    workload = wide_grammar(1, 256)
+    grammar = Grammar({token.name for token in workload.tokens})
+    for rule in workload.rules:
+        grammar.add_production(rule.name, rule.rhs.split())
+    grammar.set_start(workload.start)
+    first, second = LRTable(grammar), LRTable(grammar)
+    keys = [tuple((item.production.number, item.lr_index) for item in state) for state in first.states]
+    assert len(set(frozenset(key) for key in keys)) == len(keys)
+    assert all(len(set(key)) == len(key) for key in keys)
+    assert first.action == second.action and first.goto == second.goto

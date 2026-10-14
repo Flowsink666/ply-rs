@@ -151,7 +151,7 @@ def test_ply_eof_error_receives_none():
 
     lexer = lex.lex(module={"tokens": ("N",), "t_N": r"\d+"})
     parser = yacc.yacc(module={"tokens": ("N",), "p_expr": p_expr, "p_error": p_error})
-    assert parser.parse("12", lexer=lexer) == "eof"
+    assert parser.parse("12", lexer=lexer) is None
     assert errors == [None]
 
 

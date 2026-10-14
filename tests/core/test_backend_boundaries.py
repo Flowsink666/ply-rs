@@ -130,7 +130,7 @@ def test_parser_accepts_table_data_without_builder_diagnostics():
 
 
 @pytest.mark.parametrize("from_error", [False, True])
-def test_native_fallback_after_callback_finishes_without_replay(from_error):
+def test_rule_registration_after_callback_finishes_without_replay(from_error):
     if importlib.util.find_spec("rply._core_rs") is None:
         pytest.skip("native extension unavailable")
     source = r'''
@@ -152,16 +152,16 @@ else:
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')
     result = list(lexer.tokenize('@abc'))
-assert lexer.backend == 'python'
+assert lexer.backend == 'rust'
 assert [(t.type, t.value, t.lexpos, t.lineno) for t in result] == [('WORD', 'abc', 1, 9)]
 assert calls == ['before', 'after']
-assert len(caught) == 1
+assert len(caught) == 0
 '''.replace("FROM_ERROR", str(from_error))
     result = run_python("auto", source)
     assert result.returncode == 0, result.stderr
 
 
-def test_native_fallback_preserves_nested_state_and_callback_owner():
+def test_rule_registration_preserves_nested_state_and_callback_owner():
     if importlib.util.find_spec("rply._core_rs") is None:
         pytest.skip("native extension unavailable")
     result = run_python("auto", r'''
@@ -187,7 +187,7 @@ stack = lexer.state_stack
 with warnings.catch_warnings(record=True):
     warnings.simplefilter('always')
     lexer.add_rule('inside', 'WORD', r'\w+', word, flags=re.ASCII)
-assert lexer.backend == 'python'
+assert lexer.backend == 'rust'
 assert lexer.current_state == 'inside' and stack == ['INITIAL']
 tok = lexer.token()
 assert (tok.type, tok.value, tok.lineno, tok.lexpos) == ('WORD', 'abc', 7, 2)
@@ -197,19 +197,18 @@ assert lexer.current_state == 'INITIAL' and stack == []
     assert result.returncode == 0, result.stderr
 
 
-def test_rust_selection_does_not_construct_python_runtimes():
+def test_native_engines_do_not_import_removed_backend():
     if importlib.util.find_spec("rply._core_rs") is None:
         pytest.skip("native extension unavailable")
     result = run_python("rust", r'''
-import rply.core.lexer_engine as lex_module
-import rply.core.lr_parser as parser_module
-import rply.core.lr_table as table_module
+import importlib.abc
+import sys
+class BlockRemovedBackend(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.startswith('rply.backends.python'):
+            raise AssertionError('Removed backend imported')
+sys.meta_path.insert(0, BlockRemovedBackend())
 from rply import Grammar, LexerEngine, LRParser, LRTable
-def unexpected(*args, **kwargs):
-    raise AssertionError('Python implementation constructed in Rust mode')
-lex_module.PythonLexerEngine = unexpected
-parser_module.PythonLRParser = unexpected
-table_module.build_python_table = unexpected
 lexer = LexerEngine()
 lexer.add_rule('INITIAL', 'N', r'\d+')
 grammar = Grammar({'N'})

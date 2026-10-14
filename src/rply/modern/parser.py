@@ -40,6 +40,8 @@ class ParserMeta(type):
     """Metaclass that collects grammar rules from class methods."""
 
     def __new__(mcs, name: str, bases: Tuple[type, ...], attrs: Dict[str, Any]) -> type:
+        if isinstance(attrs.get("frozen"), bool):
+            attrs["_default_frozen"] = attrs.pop("frozen")
         cls = super().__new__(mcs, name, bases, attrs)
         rules: List[Tuple[str, List[str], Callable[..., Any], Optional[str], str, int, str]] = []
 
@@ -80,8 +82,9 @@ class Parser(metaclass=ParserMeta):
     precedence: Sequence[Tuple[str, Union[List[str], Tuple[str, ...]]]] = ()
     start: Optional[str] = None
     _collected_rules: List[Any] = []
+    _default_frozen = False
 
-    def __init__(self):
+    def __init__(self, *, frozen: Optional[bool] = None):
         self._grammar = Grammar(terminals=set(self.tokens) if self.tokens else None)
 
         if self.precedence:
@@ -106,7 +109,8 @@ class Parser(metaclass=ParserMeta):
 
         self._grammar.set_start(self.start)
         self._table = LRTable(self._grammar)
-        self._engine = LRParser(self._table, error_func=getattr(self, "error", None))
+        self._engine = LRParser(self._table, error_func=getattr(self, "error", None),
+                                frozen=self._default_frozen if frozen is None else frozen)
 
     @property
     def table(self) -> LRTable:
@@ -120,6 +124,12 @@ class Parser(metaclass=ParserMeta):
         """Use a read-only grammar snapshot for subsequent parses."""
         self._engine.freeze()
         return self
+
+    def errok(self):
+        self._engine.errok()
+
+    def restart(self):
+        self._engine.restart()
 
     def parse(
         self,

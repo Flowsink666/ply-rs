@@ -3,6 +3,13 @@
 import builtins
 from typing import Any, Dict, List, Optional, Union
 
+from rply.backends import native_core
+
+
+_VIEW_GETITEM = native_core._ProductionView.__getitem__
+_VIEW_SETITEM = native_core._ProductionView.__setitem__
+_VIEW_LENGTH = native_core._ProductionView.__len__
+
 
 def make_namemap(symbols) -> Dict[str, int]:
     """Build RHS name-to-index aliases once, preserving declaration order."""
@@ -46,7 +53,7 @@ class ParsedSymbol:
         return f"ParsedSymbol(type={self.type!r}, value={self.value!r})"
 
 
-class ProductionProxy:
+class ProductionProxy(native_core._ProductionView):
     """
     Proxy object passed to grammar rule reduction functions.
     Compatible with:
@@ -54,7 +61,7 @@ class ProductionProxy:
       - SLY: p.expr0, p.expr1, p.index, p.lineno
     """
 
-    __slots__ = ("_slice", "_stack", "lexer", "parser", "_namemap")
+    __slots__ = ("lexer", "parser", "_namemap")
 
     def __init__(
         self,
@@ -75,20 +82,13 @@ class ProductionProxy:
         return self._slice
 
     def __getitem__(self, n: Union[int, builtins.slice]) -> Any:
-        if isinstance(n, slice):
-            return [s.value for s in self._slice[n]]
-        if n >= 0:
-            return self._slice[n].value
-        elif self._stack is not None:
-            return self._stack[n].value
-        else:
-            raise IndexError("Stack is not available for negative index")
+        return _VIEW_GETITEM(self, n)
 
     def __setitem__(self, n: int, v: Any) -> None:
-        self._slice[n].value = v
+        _VIEW_SETITEM(self, n, v)
 
     def __len__(self) -> int:
-        return len(self._slice)
+        return _VIEW_LENGTH(self)
 
     # --- PLY compatibility methods ---
     def lineno(self, n: int) -> int:
@@ -137,6 +137,6 @@ class ProductionProxy:
         if self._namemap is None:
             self._namemap = make_namemap(s.type for s in self._slice[1:])
         try:
-            return self._slice[self._namemap[name]].value
+            return self[self._namemap[name]]
         except KeyError:
             raise AttributeError(f"No symbol or attribute {name!r} in production") from None

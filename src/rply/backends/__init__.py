@@ -1,37 +1,22 @@
-"""Backend selection shared by the public engine facades.
-
-Set RPLY_BACKEND to auto (default), python, or rust before importing rply.
-Explicit rust mode fails instead of silently switching implementations.
-"""
+"""Load the required native engine; auto is an alias for rust."""
 
 import os
-import warnings
 from importlib import import_module
 
 BACKEND = os.environ.get("RPLY_BACKEND", "auto").lower()
-if BACKEND not in {"auto", "python", "rust"}:
-    raise ValueError("RPLY_BACKEND must be 'auto', 'python', or 'rust'")
+if BACKEND == "python":
+    raise ValueError("RPLY_BACKEND=python is no longer supported; rply uses the native Rust engine. Use rust or auto.")
+if BACKEND not in {"auto", "rust"}:
+    raise ValueError("RPLY_BACKEND must be 'auto' or 'rust'")
 
-native_core = None
-if BACKEND != "python":
-    try:
-        native_core = import_module("rply._core_rs")
-    except ImportError:
-        if BACKEND == "rust":
-            raise ImportError(
-                "RPLY_BACKEND=rust requires the rply._core_rs extension; "
-                "build it with maturin develop --release"
-            ) from None
+try:
+    native_core = import_module("rply._core_rs")
+except ImportError as error:
+    raise ImportError(
+        "rply requires the rply._core_rs native extension; install a compatible wheel "
+        "or build it with maturin develop --release"
+    ) from error
 
-HAS_RUST_CORE = native_core is not None
-
-
-def fallback(component: str, error: Exception) -> None:
-    """Report a native setup failure, or reject it in explicit rust mode."""
-    if BACKEND == "rust":
-        raise RuntimeError(f"Rust {component} initialization failed") from error
-    warnings.warn(
-        f"Rust {component} unavailable; using Python: {error}",
-        RuntimeWarning,
-        stacklevel=2,
-    )
+if not all(hasattr(native_core, name) for name in
+           ("ParserControl", "TokenCursor", "_ProductionView", "_ReductionData")):
+    raise ImportError("rply._core_rs is outdated; rebuild it with maturin develop --release")

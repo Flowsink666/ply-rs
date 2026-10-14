@@ -3,8 +3,9 @@ Modern, type-friendly, class-based Lexer API.
 """
 
 import inspect
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 from rply.core.lexer_engine import LexerEngine, Token, LexError
+from rply.core.lexer_config import LexerSnapshot
 
 
 def token(
@@ -40,7 +41,9 @@ class LexerMeta(type):
         )
         rule_names.update(attrs)
         for attr_name in rule_names:
-            if attr_name.startswith("_") or attr_name in ("ignore", "literals", "tokens", "states"):
+            if (attr_name.startswith("_") or attr_name.startswith("ignore_")
+                    or attr_name.startswith("error_")
+                    or attr_name in ("ignore", "literals", "tokens", "states")):
                 continue
             attr_val = getattr(cls, attr_name)
 
@@ -63,6 +66,11 @@ class LexerMeta(type):
 
         cls._rules = rules  # type: ignore
         cls.tokens = token_names  # type: ignore
+        states = {}
+        for base in reversed(cls.__mro__):
+            declarations = base.__dict__.get("states", ())
+            states.update(dict(declarations))
+        cls._states = tuple(states.items())
         return cls
 
 
@@ -74,12 +82,20 @@ class Lexer(metaclass=LexerMeta):
     ignore: str = ""
     literals: Union[str, Set[str], List[str]] = ""
     tokens: Set[str] = set()
+    states: Sequence[Tuple[str, str]] = ()
     _rules: List[Any] = []
 
     def __init__(self):
         self._engine = LexerEngine()
-        if self.ignore:
-            self._engine.set_ignore("INITIAL", self.ignore)
+        self._engine._runtime.engine.callback_owner = self
+        for name, kind in self._states:
+            self._engine.add_state(name, kind)
+        for name, kind in (("INITIAL", "inclusive"), *self._states):
+            ignored = getattr(self, "ignore_" + name, self.ignore if kind == "inclusive" else "")
+            self._engine.set_ignore(name, ignored)
+            error = getattr(self, "error_" + name, getattr(self, "error", None) if kind == "inclusive" else None)
+            if error is not None:
+                self._engine.set_error_func(name, error)
         if self.literals:
             self._engine.set_literals(self.literals)
 
@@ -99,6 +115,60 @@ class Lexer(metaclass=LexerMeta):
 
     def tokenize(self, text: Optional[str] = None) -> Iterator[Token]:
         return self._engine.tokenize(text)
+
+    def begin(self, state: str) -> None:
+        self._engine.begin(state)
+
+    def push_state(self, state: str) -> None:
+        self._engine.push_state(state)
+
+    def pop_state(self) -> None:
+        self._engine.pop_state()
+
+    def skip(self, n: int = 1) -> None:
+        self._engine.skip(n)
+
+    def capture_state(self) -> LexerSnapshot:
+        return self._engine.capture_state()
+
+    def restore_state(self, state: LexerSnapshot) -> None:
+        self._engine.restore_state(state)
+
+    @property
+    def current_state(self) -> str:
+        return self._engine.current_state
+
+    @current_state.setter
+    def current_state(self, state: str) -> None:
+        self.begin(state)
+
+    @property
+    def state_stack(self):
+        return self._engine.state_stack
+
+    @state_stack.setter
+    def state_stack(self, states):
+        self._engine.state_stack = states
+
+    @property
+    def lineno(self) -> int:
+        return self._engine.lineno
+
+    @lineno.setter
+    def lineno(self, value: int) -> None:
+        self._engine.lineno = value
+
+    @property
+    def pos(self) -> int:
+        return self._engine.pos
+
+    @pos.setter
+    def pos(self, value: int) -> None:
+        self._engine.pos = value
+
+    @property
+    def data(self) -> str:
+        return self._engine.data
 
 
 ModernLexer = Lexer

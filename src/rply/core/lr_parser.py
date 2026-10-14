@@ -2,12 +2,10 @@
 
 from typing import Any, Callable, Iterator, Optional, Sequence, Union
 
-from rply.backends import HAS_RUST_CORE, fallback, native_core
-from rply.backends.interfaces import ParserRuntime
-from rply.backends.python.parser import PythonLRParser
+from rply.backends import native_core
 from rply.backends.rust_parser import RustParserRuntime
 from rply.core.lr_table import LRTable
-from rply.core.parser_context import ParseContext
+from rply.core.parser_context import ParseContext, TokenCursor
 from rply.core.production import ParsedSymbol, ProductionProxy, ParserError
 from rply.core.table_data import ParseTableData
 
@@ -20,18 +18,12 @@ class LRParser:
         if frozen:
             self._data = self._data.frozen_copy()
         self.error_func = error_func
-        self._runtime: ParserRuntime
+        self._sessions = []
+        self._runtime: RustParserRuntime
         self.backend, self._runtime = self._create_runtime(self._data)
 
     def _create_runtime(self, data):
-        if HAS_RUST_CORE:
-            try:
-                runtime = RustParserRuntime(data, native_core, getattr(self.table, "runtime_artifact", None))
-            except Exception as error:
-                fallback("parser", error)
-            else:
-                return "rust", runtime
-        return "python", PythonLRParser(data)
+        return "rust", RustParserRuntime(data, native_core, getattr(self.table, "runtime_artifact", None))
 
     @property
     def frozen(self):
@@ -81,9 +73,31 @@ class LRParser:
         self._data.goto = value
 
     def parse(self, token_stream: Union[Iterator[Any], Sequence[Any]],
-              lexer: Any = None, tracking: bool = True, *, parser: Any = None) -> Any:
+              lexer: Any = None, tracking: bool = True, *, parser: Any = None,
+              recovery_style: str = "core") -> Any:
+        control = native_core.ParserControl()
+        cursor = token_stream if isinstance(token_stream, TokenCursor) else TokenCursor(token_stream)
         context = ParseContext(
             lexer=lexer, parser=self if parser is None else parser,
             tracking=tracking, error_func=self.error_func,
+            control=control, recovery_style=recovery_style,
         )
-        return self._runtime.parse(token_stream, context=context)
+        self._sessions.append((control, cursor, context))
+        try:
+            return self._runtime.parse(cursor, context=context)
+        finally:
+            self._sessions.pop()
+
+    def _active_session(self):
+        if not self._sessions:
+            raise RuntimeError("Parser recovery controls require an active parse")
+        return self._sessions[-1]
+
+    def errok(self):
+        self._active_session()[0].errok()
+
+    def restart(self):
+        self._active_session()[0].restart()
+
+    def token(self):
+        return next(self._active_session()[1], None)

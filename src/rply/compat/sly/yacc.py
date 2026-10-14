@@ -9,6 +9,8 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set,
 from rply.core.grammar import Grammar, GrammarError
 from rply.core.lr_table import LRTable
 from rply.core.lr_parser import LRParser, ProductionProxy
+from rply.core.parser_context import TokenCursor
+from rply.core.symbols import EOF_SYMBOL
 from rply.compat.sly.decorators import _decorator
 
 
@@ -71,18 +73,27 @@ class ParserMeta(type):
         cls = super().__new__(mcs, name, bases, attrs)
         rules: List[Tuple[str, List[str], Callable[..., Any]]] = []
 
-        for key, val in attrs.items():
+        rule_names = dict.fromkeys(
+            key for base in cls.__mro__[1:]
+            for key in base.__dict__.get("_sly_rule_names", ())
+        )
+        rule_names.update(attrs)
+        collected_names = []
+        for key in rule_names:
+            val = getattr(cls, key, None)
             funcs: List[Callable[..., Any]] = []
             curr = val
             while callable(curr) and hasattr(curr, "rules"):
                 funcs.append(curr)
                 curr = getattr(curr, "next_func", None)
+            if funcs:
+                collected_names.append(key)
 
             for func in reversed(funcs):
                 func_rules = getattr(func, "rules")
                 for rule_str in func_rules:
                     if ":" in rule_str or "::=" in rule_str:
-                        delim = ":" if ":" in rule_str else "::="
+                        delim = "::=" if "::=" in rule_str else ":"
                         lhs, rhs = rule_str.split(delim, 1)
                         lhs = lhs.strip()
                         rhs_syms = rhs.strip().split()
@@ -92,6 +103,7 @@ class ParserMeta(type):
                     rules.append((lhs, rhs_syms, func))
 
         cls._sly_rules = rules  # type: ignore
+        cls._sly_rule_names = tuple(collected_names)
         return cls
 
 
@@ -137,8 +149,26 @@ class Parser(metaclass=ParserMeta):
         self._table = LRTable(self._grammar)
 
         err_func = getattr(self, "error", None)
-        bound_err = err_func.__get__(self, self.__class__) if callable(err_func) else None
+        bound_err = (lambda tok: err_func(None if tok.type == EOF_SYMBOL else tok)) if callable(err_func) else None
         self._engine = LRParser(self._table, error_func=bound_err)
 
     def parse(self, token_stream: Union[Iterator[Any], Sequence[Any]]) -> Any:
-        return self._engine.parse(token_stream)
+        cursor = TokenCursor(token_stream)
+        previous = self.__dict__.get("tokens", _MISSING)
+        self.tokens = cursor
+        try:
+            return self._engine.parse(cursor, parser=self, recovery_style="sly")
+        finally:
+            if previous is _MISSING:
+                del self.tokens
+            else:
+                self.tokens = previous
+
+    def errok(self):
+        self._engine.errok()
+
+    def restart(self):
+        self._engine.restart()
+
+
+_MISSING = object()

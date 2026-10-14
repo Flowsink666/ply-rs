@@ -62,7 +62,7 @@ def load_reference(name):
         except ModuleNotFoundError as error:
             if error.name != name:
                 raise
-            raise RuntimeError(f"Missing {name}; see upstream/README.md or install {name}") from error
+            raise RuntimeError(f"Missing {name}; see docs/upstream.md or install {name}") from error
     alias = f"_benchmark_reference_{name}"
     if alias not in sys.modules:
         spec = importlib.util.spec_from_file_location(alias, package)
@@ -164,6 +164,6 @@ def build_sly(workload):
 
 
 def build(workload, engine):
-    if engine in ("python", "rust"):
+    if engine == "rust":
         return build_rply(workload, engine)
     return {"ply": build_ply, "sly": build_sly}[engine](workload)

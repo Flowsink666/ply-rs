@@ -16,11 +16,11 @@ def run_suite(*args):
                           capture_output=True, text=True, encoding="utf-8", timeout=60)
 
 
-def test_all_workloads_validate_in_source_only_mode():
-    result = run_suite("--engine", "python", "--size", "3", "--grammar-width", "8", "--check")
+def test_all_workloads_validate_with_native_engine():
+    result = run_suite("--engine", "rust", "--size", "3", "--grammar-width", "8", "--check")
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    cases = report["results"]["python"]["cases"]
+    cases = report["results"]["rust"]["cases"]
     assert set(cases) == {"arithmetic", "nested", "json", "json-unicode", "mini-language", "wide-grammar"}
     assert all(case["verified"] and case["token_count"] > 0 for case in cases.values())
     assert all(case["timings"] == {} for case in cases.values())
@@ -30,12 +30,12 @@ def test_all_workloads_validate_in_source_only_mode():
 
 def test_measurements_save_raw_samples_and_throughput(tmp_path):
     output = tmp_path / "report.json"
-    result = run_suite("--engine", "python", "--case", "json-unicode", "--size", "2",
+    result = run_suite("--engine", "rust", "--case", "json-unicode", "--size", "2",
                        "--repeat", "2", "--iterations", "2", "--warmup", "1", "--output", str(output))
     assert result.returncode == 0, result.stderr
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report == json.loads(result.stdout)
-    timings = report["results"]["python"]["cases"]["json-unicode"]["timings"]
+    timings = report["results"]["rust"]["cases"]["json-unicode"]["timings"]
     assert set(timings) == {"lex", "parse", "end-to-end", "build"}
     for measurement in timings.values():
         assert len(measurement["samples_ms"]) == 2
@@ -47,7 +47,7 @@ def test_measurements_save_raw_samples_and_throughput(tmp_path):
 
 @pytest.mark.parametrize("args", [
     ("--size", "0"), ("--repeat", "-1"), ("--iterations", "0"),
-    ("--grammar-width", "0"), ("--engine", "python", "python"),
+    ("--grammar-width", "0"), ("--engine", "rust", "rust"),
 ])
 def test_invalid_sampling_options_fail_before_running(args):
     result = run_suite(*args)

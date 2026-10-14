@@ -51,7 +51,7 @@ def test_two_reductions_and_shift_keep_reference_choice(frozen):
     assert parser.parse([Token("a", "a")]) == EXPECTED
 
 
-@pytest.mark.parametrize("mode", ["python", "rust", "auto"])
+@pytest.mark.parametrize("mode", ["rust", "auto"])
 def test_mixed_conflict_backend_selection(mode):
     if mode != "python" and importlib.util.find_spec("rply._core_rs") is None:
         pytest.skip("native extension unavailable")
@@ -61,7 +61,7 @@ from rply import LRParser, LRTable, Token
 from tests.core.test_conflict_order import make_conflict_grammar, EXPECTED
 
 table = LRTable(make_conflict_grammar())
-assert table.backend == ('python' if os.environ['RPLY_BACKEND'] == 'python' else 'rust')
+assert table.backend == 'rust'
 assert table.action[0]['a'] == -2, table.action[0]
 assert LRParser(table).parse([Token('a', 'a')]) == EXPECTED
 assert [(c.kind, c.token, c.resolution) for c in table.conflicts if c.state == 0] == [

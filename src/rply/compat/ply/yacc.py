@@ -95,7 +95,8 @@ class YaccParser:
                     if tok is None:
                         break
                     yield tok
-            return self._engine.parse(token_gen(), lexer=active_lexer, tracking=tracking, parser=self)
+            return self._engine.parse(token_gen(), lexer=active_lexer, tracking=tracking, parser=self,
+                                      recovery_style="ply")
 
         if input is not None:
             if active_lexer is None:
@@ -105,7 +106,17 @@ class YaccParser:
         if active_lexer is None:
             raise YaccError("No token source or input provided to parse()")
 
-        return self._engine.parse(active_lexer, lexer=active_lexer, tracking=tracking, parser=self)
+        return self._engine.parse(active_lexer, lexer=active_lexer, tracking=tracking, parser=self,
+                                  recovery_style="ply")
+
+    def errok(self):
+        self._engine.errok()
+
+    def restart(self):
+        self._engine.restart()
+
+    def token(self):
+        return self._engine.token()
 
 
 def _parse_ply_docstring(doc: str) -> List[Tuple[str, List[str]]]:
@@ -242,8 +253,10 @@ def yacc(
             ptok.value = tok.value
             ptok.lineno = tok.lineno
             ptok.lexpos = tok.lexpos
+            ptok.lexer = parser_object._engine._active_session()[2].lexer
             return error_func(ptok)
         wrapped_err_func = err_wrapper
 
     engine = LRParser(table, error_func=wrapped_err_func)
-    return YaccParser(engine, table)
+    parser_object = YaccParser(engine, table)
+    return parser_object

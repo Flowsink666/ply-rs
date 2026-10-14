@@ -41,7 +41,7 @@ def wheel_verifier():
 @pytest.fixture
 def gated_run(pytester, monkeypatch):
     monkeypatch.setenv("RPLY_STRICT_TESTS", "1")
-    monkeypatch.setenv("RPLY_BACKEND", "python")
+    monkeypatch.setenv("RPLY_BACKEND", "rust")
     pytester.makeini("[pytest]\n")
     # Skip-report tests isolate the pytest hooks from dependency preflight.
     # The preflight itself is exercised separately below.
@@ -67,16 +67,15 @@ def test_undeclared_collection_skip_is_an_error(gated_run):
     assert ET.parse(gated_run.path / "report.xml").find(".//error") is not None
 
 
-def test_declared_python_skip_retains_its_reason(gated_run):
+def test_obsolete_backend_skip_permissions_are_not_accepted(gated_run):
     gated_run.makeconftest(
         (gated_run.path / "conftest.py").read_text(encoding="utf-8")
         + "\nPYTHON_ONLY_SKIP_PERMISSIONS = {'test_probe.py::test_probe': 'declared native contract'}\n"
     )
     gated_run.makepyfile(test_probe="import pytest\ndef test_probe():\n    pytest.skip('declared native contract')\n")
     result = gated_run.runpytest_subprocess("-q", "--junitxml=report.xml")
-    result.assert_outcomes(skipped=1)
-    skipped = ET.parse(gated_run.path / "report.xml").find(".//skipped")
-    assert skipped is not None and skipped.attrib["message"] == "declared native contract"
+    result.assert_outcomes(failed=1)
+    assert ET.parse(gated_run.path / "report.xml").find(".//skipped") is None
 
 
 def test_missing_native_dependency_is_never_a_permitted_skip(gated_run):
@@ -111,7 +110,7 @@ def test_missing_reference_fails_during_strict_preflight(pytester, monkeypatch, 
     result.stderr.fnmatch_lines([f"*Strict prerequisites require upstream/{reference}*"])
 
 
-@pytest.mark.parametrize("requested, expected", [("python", "python"), ("rust", "rust"), ("auto", "rust")])
+@pytest.mark.parametrize("requested, expected", [("rust", "rust"), ("auto", "rust")])
 def test_backend_preflight_checks_basic_components(gate_module, requested, expected):
     components = {name: SimpleNamespace(backend=expected) for name in ("lexer", "table", "parser")}
     gate_module.verify_backend(requested, components, True)
@@ -120,9 +119,9 @@ def test_backend_preflight_checks_basic_components(gate_module, requested, expec
         gate_module.verify_backend(requested, components, True)
 
 
-def test_python_preflight_still_requires_native_for_subprocess_contracts(gate_module):
-    with pytest.raises(pytest.UsageError, match="including in Python mode"):
-        gate_module.verify_backend("python", {}, False)
+def test_preflight_requires_native_extension(gate_module):
+    with pytest.raises(pytest.UsageError, match="loadable rply._core_rs"):
+        gate_module.verify_backend("rust", {}, False)
 
 
 @pytest.mark.parametrize("exception_type", [ImportError, OSError])
@@ -137,14 +136,6 @@ def test_found_but_unloadable_native_fails_preflight(gate_module, monkeypatch, e
         gate_module.native_prerequisite_available()
 
 
-def test_skip_permission_requires_matching_node_reason_and_backend(gate_module, monkeypatch):
-    node = "tests/core/test_state_contracts.py::test_native_metadata_refresh_reuses_an_edited_runtime_table"
-    monkeypatch.setenv("RPLY_BACKEND", "python")
-    assert gate_module.allowed_skip(node + "[parameter]", "native table sharing test")
-    assert not gate_module.allowed_skip(node, "native extension unavailable")
-    assert not gate_module.allowed_skip(node + "_other", "native table sharing test")
-    monkeypatch.setenv("RPLY_BACKEND", "rust")
-    assert not gate_module.allowed_skip(node, "native table sharing test")
 
 
 def test_wheel_verifier_accepts_installed_python_and_native_origins(wheel_verifier, tmp_path):

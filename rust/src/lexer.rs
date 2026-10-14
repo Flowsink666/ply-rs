@@ -1,14 +1,38 @@
 use pyo3::class::gc::{PyTraverseError, PyVisit};
 use pyo3::prelude::*;
-use pyo3::types::{PyAnyMethods, PyBool, PyString};
-use regex_automata::{meta::Regex, util::syntax, Anchored, Input};
+use pyo3::types::{PyAnyMethods, PyBool, PySlice, PyString};
+use regex_automata::{meta::Regex, Anchored, Input, MatchKind};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::sync::Arc;
+
+fn string_codepoints(text: &Bound<'_, PyString>) -> PyResult<Vec<u32>> {
+    match text.to_cow() {
+        Ok(text) => Ok(text.chars().map(u32::from).collect()),
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyUnicodeEncodeError>(text.py()) => {
+            // Call the built-in method, bypassing str-subclass overrides. UTF-32
+            // with surrogatepass preserves every Python code point separately.
+            let bytes = text
+                .py()
+                .get_type::<PyString>()
+                .call_method1("encode", (text, "utf-32-le", "surrogatepass"))?
+                .extract::<Vec<u8>>()?;
+            Ok(bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .copied()
+                .map(u32::from_le_bytes)
+                .collect())
+        }
+        Err(error) => Err(error),
+    }
+}
 
 #[pyclass(name = "Token", skip_from_py_object)]
 pub struct PyToken {
-    #[pyo3(get, set)]
-    pub sym_type: String,
+    pub sym_type: Arc<str>,
     #[pyo3(get, set)]
     pub value: Py<PyAny>,
     #[pyo3(get, set)]
@@ -53,33 +77,50 @@ impl PyToken {
         lexpos: usize,
         end: Option<usize>,
         lexer: Option<Py<PyAny>>,
-    ) -> Self {
-        let val_len = if let Ok(s) = value.bind(py).extract::<String>() {
-            s.chars().count()
+    ) -> PyResult<Self> {
+        let val_len = if let Ok(s) = value.bind(py).cast::<PyString>() {
+            match s.to_cow() {
+                Ok(text) => text.chars().count(),
+                Err(_) => string_codepoints(s)?.len(),
+            }
         } else {
             1
         };
-        let end_val = end.unwrap_or(lexpos + val_len);
+        let end_val = match end {
+            Some(end) => end,
+            None => lexpos.checked_add(val_len).ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("token end exceeds the counter range")
+            })?,
+        };
         let lexer_val = lexer.unwrap_or_else(|| py.None());
 
-        Self {
-            sym_type: tok_type,
+        Ok(Self {
+            sym_type: tok_type.into(),
             value,
             lineno,
             lexpos,
             end: end_val,
             lexer: lexer_val,
-        }
+        })
     }
 
     #[getter(r#type)]
     fn get_type(&self) -> String {
-        self.sym_type.clone()
+        self.sym_type.to_string()
     }
 
     #[setter(r#type)]
     fn set_type(&mut self, val: String) {
-        self.sym_type = val;
+        self.sym_type = val.into();
+    }
+
+    #[getter(sym_type)]
+    fn get_sym_type(&self) -> String {
+        self.sym_type.to_string()
+    }
+    #[setter(sym_type)]
+    fn set_sym_type(&mut self, value: String) {
+        self.sym_type = value.into();
     }
 
     #[getter]
@@ -114,7 +155,7 @@ impl PyToken {
         }
         let eq = self
             .sym_type
-            .as_str()
+            .as_ref()
             .into_pyobject(py)?
             .as_any()
             .eq(other.getattr("type")?)?
@@ -123,19 +164,42 @@ impl PyToken {
     }
 }
 
+pub enum RuleMatcher {
+    Native(Regex),
+    PythonRe(Py<PyAny>),
+}
+
 pub struct CompiledRule {
-    pub name: String,
+    pub name: Arc<str>,
     pub pattern: String,
     pub func: Option<Py<PyAny>>,
     pub priority: i32,
-    pub regex: Regex,
+    pub matcher: RuleMatcher,
+    // Native rules also retain the authoritative matcher for Python strings
+    // containing lone surrogates, which cannot be searched as UTF-8.
+    pub python_match: Option<Py<PyAny>>,
+    ascii_only: bool,
+    required_prefix: String,
+}
+
+enum ScanStep {
+    Native {
+        regex: Regex,
+        rules: Vec<Rc<CompiledRule>>,
+    },
+    PythonRe(Rc<CompiledRule>),
+}
+
+struct ScanPlan {
+    steps: Vec<ScanStep>,
 }
 
 pub struct StateConfig {
     pub kind: String, // "inclusive" or "exclusive"
-    pub rules: Vec<CompiledRule>,
-    pub ignore: String,
+    pub rules: Vec<Rc<CompiledRule>>,
+    pub ignore: Vec<u32>,
     pub error_func: Option<Py<PyAny>>,
+    plans: [Option<Rc<ScanPlan>>; 2],
 }
 
 #[pyclass(name = "LexerEngine", unsendable)]
@@ -146,15 +210,16 @@ pub struct PyLexerEngine {
     // input instead of copying a suffix (or the whole input) for every error.
     source_text: RefCell<Option<Py<PyString>>>,
     char_indices: RefCell<Vec<(usize, char)>>,
+    surrogate_codepoints: RefCell<Vec<u32>>,
     is_ascii: Cell<bool>,
+    native_input: Cell<bool>,
     length: Cell<usize>,
     pos: Cell<usize>,
     lineno: Cell<usize>,
-    current_state: RefCell<String>,
+    current_state: RefCell<Arc<str>>,
     state_stack: RefCell<Vec<String>>,
-    literals: RefCell<HashSet<char>>,
+    literals: RefCell<HashSet<u32>>,
     callback_owner: RefCell<Option<Py<PyAny>>>,
-    stop_requested: Cell<bool>,
     input_revision: Cell<usize>,
 }
 
@@ -163,8 +228,22 @@ impl PyLexerEngine {
     // whole state transition before __del__ on that source can run Python.
     fn replace_input(&self, text: &Bound<'_, PyString>) -> PyResult<Option<Py<PyString>>> {
         let source = text.clone().unbind();
-        let text = text.extract::<String>()?;
-        self.stop_requested.set(false);
+        let (text, native_input, codepoints) = match text.extract::<String>() {
+            Ok(text) => (text, true, Vec::new()),
+            Err(error)
+                if error.is_instance_of::<pyo3::exceptions::PyUnicodeEncodeError>(text.py()) =>
+            {
+                let codepoints = string_codepoints(text)?;
+                let buffer = codepoints
+                    .iter()
+                    .map(|&value| char::from_u32(value).unwrap_or('\u{fffd}'))
+                    .collect();
+                (buffer, false, codepoints)
+            }
+            Err(error) => return Err(error),
+        };
+        self.native_input.set(native_input);
+        *self.surrogate_codepoints.borrow_mut() = codepoints;
         let is_ascii = text.is_ascii();
         self.is_ascii.set(is_ascii);
         if !is_ascii {
@@ -178,11 +257,104 @@ impl PyLexerEngine {
         let previous_source = self.source_text.borrow_mut().replace(source);
         self.pos.set(0);
         self.lineno.set(1);
-        *self.current_state.borrow_mut() = "INITIAL".to_string();
+        *self.current_state.borrow_mut() = Arc::from("INITIAL");
         self.state_stack.borrow_mut().clear();
         self.input_revision
             .set(self.input_revision.get().wrapping_add(1));
         Ok(previous_source)
+    }
+
+    fn invalidate_plans(&self) {
+        for state in self.states.borrow_mut().values_mut() {
+            state.plans = [None, None];
+        }
+    }
+
+    fn scan_plan(&self) -> PyResult<Rc<ScanPlan>> {
+        let name = self.current_state.borrow().clone();
+        let ascii = self.is_ascii.get();
+        let states = self.states.borrow();
+        let state = states.get(name.as_ref()).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!("Undefined lexer state {:?}", name))
+        })?;
+        if let Some(plan) = &state.plans[usize::from(ascii)] {
+            return Ok(Rc::clone(plan));
+        }
+        let initial = if state.kind == "inclusive" && name.as_ref() != "INITIAL" {
+            states
+                .get("INITIAL")
+                .map(|state| state.rules.as_slice())
+                .unwrap_or(&[])
+        } else {
+            &[]
+        };
+        let local = &state.rules;
+        let (mut i, mut j) = (0, 0);
+        let mut rules = Vec::with_capacity(initial.len() + local.len());
+        while i < initial.len() || j < local.len() {
+            if i < initial.len() && (j == local.len() || initial[i].priority >= local[j].priority) {
+                rules.push(Rc::clone(&initial[i]));
+                i += 1;
+            } else {
+                rules.push(Rc::clone(&local[j]));
+                j += 1;
+            }
+        }
+        drop(states);
+        let mut steps = Vec::new();
+        let mut i = 0;
+        while i < rules.len() {
+            if !matches!(rules[i].matcher, RuleMatcher::Native(_))
+                || (rules[i].ascii_only && !ascii)
+            {
+                steps.push(ScanStep::PythonRe(Rc::clone(&rules[i])));
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let priority = rules[i].priority;
+            while i < rules.len()
+                && rules[i].priority == priority
+                && matches!(rules[i].matcher, RuleMatcher::Native(_))
+                && (!rules[i].ascii_only || ascii)
+            {
+                i += 1;
+            }
+            let group = &rules[start..i];
+            let patterns: Vec<&str> = group.iter().map(|rule| rule.pattern.as_str()).collect();
+            let combined = if group.len() > 1 {
+                Regex::builder()
+                    .configure(Regex::config().match_kind(MatchKind::LeftmostFirst))
+                    .build_many(&patterns)
+                    .ok()
+            } else {
+                None
+            };
+            if let Some(regex) = combined {
+                steps.push(ScanStep::Native {
+                    regex,
+                    rules: group.to_vec(),
+                });
+            } else {
+                // Group compilation is optional; its resource limits must not
+                // reject individually valid rules or change their order.
+                for rule in group {
+                    if let RuleMatcher::Native(regex) = &rule.matcher {
+                        steps.push(ScanStep::Native {
+                            regex: regex.clone(),
+                            rules: vec![Rc::clone(rule)],
+                        });
+                    }
+                }
+            }
+        }
+        let plan = Rc::new(ScanPlan { steps });
+        self.states
+            .borrow_mut()
+            .get_mut(name.as_ref())
+            .unwrap()
+            .plans[usize::from(ascii)] = Some(Rc::clone(&plan));
+        Ok(plan)
     }
 }
 
@@ -200,6 +372,10 @@ impl PyLexerEngine {
                 visit.call(state.error_func.as_ref())?;
                 for rule in &state.rules {
                     visit.call(rule.func.as_ref())?;
+                    visit.call(rule.python_match.as_ref())?;
+                    if let RuleMatcher::PythonRe(matcher) = &rule.matcher {
+                        visit.call(matcher)?;
+                    }
                 }
             }
         }
@@ -218,16 +394,11 @@ impl PyLexerEngine {
             // the source must also leave an empty, consistent scan buffer.
             lexer.data.get_mut().clear();
             lexer.char_indices.get_mut().clear();
+            lexer.surrogate_codepoints.get_mut().clear();
             lexer.is_ascii.set(true);
             lexer.length.set(0);
             lexer.pos.set(0);
-            for state in lexer.states.get_mut().values_mut() {
-                previous.extend(state.error_func.take());
-                for rule in &mut state.rules {
-                    previous.extend(rule.func.take());
-                }
-            }
-            previous
+            (previous, std::mem::take(lexer.states.get_mut()))
         };
         drop(previous);
     }
@@ -240,8 +411,9 @@ impl PyLexerEngine {
             StateConfig {
                 kind: "inclusive".to_string(),
                 rules: Vec::new(),
-                ignore: String::new(),
+                ignore: Vec::new(),
                 error_func: None,
+                plans: [None, None],
             },
         );
 
@@ -250,15 +422,16 @@ impl PyLexerEngine {
             data: RefCell::new(String::new()),
             source_text: RefCell::new(None),
             char_indices: RefCell::new(Vec::new()),
+            surrogate_codepoints: RefCell::new(Vec::new()),
             is_ascii: Cell::new(true),
+            native_input: Cell::new(true),
             length: Cell::new(0),
             pos: Cell::new(0),
             lineno: Cell::new(1),
-            current_state: RefCell::new("INITIAL".to_string()),
+            current_state: RefCell::new(Arc::from("INITIAL")),
             state_stack: RefCell::new(Vec::new()),
             literals: RefCell::new(HashSet::new()),
             callback_owner: RefCell::new(None),
-            stop_requested: Cell::new(false),
             input_revision: Cell::new(0),
         }
     }
@@ -284,8 +457,12 @@ impl PyLexerEngine {
     }
 
     #[getter]
-    fn data(&self) -> String {
-        self.data.borrow().clone()
+    fn data(&self, py: Python<'_>) -> Py<PyString> {
+        self.source_text
+            .borrow()
+            .as_ref()
+            .map(|source| source.clone_ref(py))
+            .unwrap_or_else(|| PyString::new(py, "").unbind())
     }
 
     #[getter]
@@ -300,7 +477,7 @@ impl PyLexerEngine {
 
     #[getter]
     fn current_state(&self) -> String {
-        self.current_state.borrow().clone()
+        self.current_state.borrow().to_string()
     }
 
     #[getter]
@@ -333,17 +510,8 @@ impl PyLexerEngine {
 
     #[setter]
     fn set_callback_owner(&self, lexer: Py<PyAny>) {
-        *self.callback_owner.borrow_mut() = Some(lexer);
-    }
-
-    #[getter]
-    fn stop_requested(&self) -> bool {
-        self.stop_requested.get()
-    }
-
-    #[setter]
-    fn set_stop_requested(&self, value: bool) {
-        self.stop_requested.set(value);
+        let previous = self.callback_owner.borrow_mut().replace(lexer);
+        drop(previous);
     }
 
     #[pyo3(signature = (name, kind="inclusive"))]
@@ -361,51 +529,48 @@ impl PyLexerEngine {
             .or_insert_with(|| StateConfig {
                 kind: kind.to_string(),
                 rules: Vec::new(),
-                ignore: String::new(),
+                ignore: Vec::new(),
                 error_func: None,
+                plans: [None, None],
             });
+        self.invalidate_plans();
         Ok(())
     }
 
-    #[pyo3(signature = (state, name, pattern, func=None, priority=0, flags=0))]
+    #[pyo3(signature = (state, name, pattern, func=None, priority=0, flags=0, *, compiled=None))]
+    #[allow(clippy::too_many_arguments)]
     fn add_rule(
         &self,
+        py: Python<'_>,
         state: &str,
         name: &str,
-        pattern: &str,
+        pattern: &Bound<'_, PyString>,
         func: Option<Py<PyAny>>,
         priority: i32,
         flags: i32,
+        compiled: Option<Py<PyAny>>,
     ) -> PyResult<()> {
-        // Python re flags: IGNORECASE, MULTILINE, DOTALL, UNICODE, VERBOSE.
-        // Reject flags without an equivalent instead of silently changing matching.
-        const SUPPORTED_FLAGS: i32 = 2 | 8 | 16 | 32 | 64;
-        if flags & !SUPPORTED_FLAGS != 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Unsupported Python regex flags for Rust lexer: {}",
-                flags
-            )));
-        }
-        let wrapped = if flags & 64 != 0 {
-            format!("(?:{}\n)", pattern) // A trailing verbose comment must not hide ')'.
-        } else {
-            format!("(?:{})", pattern)
+        let compiled = match compiled {
+            Some(compiled) => compiled,
+            None => py
+                .import("re")?
+                .getattr("compile")?
+                .call1((pattern, flags))?
+                .unbind(),
         };
-        let regex = Regex::builder()
-            .syntax(
-                syntax::Config::new()
-                    .case_insensitive(flags & 2 != 0)
-                    .multi_line(flags & 8 != 0)
-                    .dot_matches_new_line(flags & 16 != 0)
-                    .ignore_whitespace(flags & 64 != 0),
-            )
-            .build(&wrapped)
-            .map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Failed to compile regex {:?} for token {:?}: {}",
-                    pattern, name, e
-                ))
-            })?;
+        let (native_pattern, ascii_only, required_prefix) = py
+            .import("rply.core.regex_support")?
+            .getattr("native_pattern")?
+            .call1((pattern, flags, compiled.bind(py)))?
+            .extract::<(Option<String>, bool, String)>()?;
+        let python_match = compiled.bind(py).getattr("match")?.unbind();
+        let native = native_pattern
+            .as_ref()
+            .and_then(|pattern| Regex::new(pattern).ok());
+        let (matcher, python_match) = match native {
+            Some(regex) => (RuleMatcher::Native(regex), Some(python_match)),
+            None => (RuleMatcher::PythonRe(python_match), None),
+        };
 
         // Compiling a rejected rule must not leave an empty state behind.
         if !self.states.borrow().contains_key(state) {
@@ -413,27 +578,54 @@ impl PyLexerEngine {
         }
 
         let rule = CompiledRule {
-            name: name.to_string(),
-            pattern: pattern.to_string(),
+            name: name.into(),
+            pattern: native_pattern.unwrap_or_default(),
             func,
             priority,
-            regex,
+            matcher,
+            python_match,
+            ascii_only,
+            required_prefix,
         };
 
         if let Some(st) = self.states.borrow_mut().get_mut(state) {
-            st.rules.push(rule);
+            st.rules.push(Rc::new(rule));
             st.rules
                 .sort_by_key(|rule| std::cmp::Reverse(rule.priority));
         }
+        self.invalidate_plans();
         Ok(())
     }
 
-    fn set_ignore(&self, state: &str, chars: &str) -> PyResult<()> {
+    #[getter]
+    fn matcher_kinds(&self) -> HashMap<String, Vec<&'static str>> {
+        self.states
+            .borrow()
+            .iter()
+            .map(|(name, state)| {
+                (
+                    name.clone(),
+                    state
+                        .rules
+                        .iter()
+                        .map(|rule| match rule.matcher {
+                            RuleMatcher::Native(_) if rule.ascii_only => "native-ascii",
+                            RuleMatcher::Native(_) => "native",
+                            RuleMatcher::PythonRe(_) => "python-re",
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn set_ignore(&self, state: &str, chars: &Bound<'_, PyString>) -> PyResult<()> {
+        let chars = string_codepoints(chars)?;
         if !self.states.borrow().contains_key(state) {
             self.add_state(state, "inclusive")?;
         }
         if let Some(st) = self.states.borrow_mut().get_mut(state) {
-            st.ignore = chars.to_string();
+            st.ignore = chars;
         }
         Ok(())
     }
@@ -443,27 +635,28 @@ impl PyLexerEngine {
         if !self.states.borrow().contains_key(state) {
             self.add_state(state, "inclusive")?;
         }
-        if let Some(st) = self.states.borrow_mut().get_mut(state) {
-            st.error_func = func;
-        }
+        let previous = self
+            .states
+            .borrow_mut()
+            .get_mut(state)
+            .and_then(|st| std::mem::replace(&mut st.error_func, func));
+        drop(previous);
         Ok(())
     }
 
     fn set_literals(&self, lits: &Bound<'_, PyAny>) -> PyResult<()> {
-        let mut lits_mut = self.literals.borrow_mut();
-        lits_mut.clear();
-        if let Ok(s) = lits.extract::<String>() {
-            for c in s.chars() {
-                lits_mut.insert(c);
-            }
-        } else if let Ok(iter) = lits.try_iter() {
+        let mut literals = HashSet::new();
+        if let Ok(s) = lits.cast::<PyString>() {
+            literals.extend(string_codepoints(s)?);
+        } else {
+            let iter = lits.try_iter()?;
             for item in iter {
-                let s = item?.extract::<String>()?;
-                for c in s.chars() {
-                    lits_mut.insert(c);
-                }
+                literals.extend(string_codepoints(item?.cast::<PyString>()?)?);
             }
         }
+        // Iteration can run Python and re-enter the lexer. Commit only after
+        // every item is converted, without holding a runtime borrow.
+        *self.literals.borrow_mut() = literals;
         Ok(())
     }
 
@@ -497,7 +690,7 @@ impl PyLexerEngine {
         let previous_source = self.replace_input(data)?;
         self.pos.set(pos);
         self.lineno.set(lineno);
-        *self.current_state.borrow_mut() = current_state.to_string();
+        *self.current_state.borrow_mut() = Arc::from(current_state);
         *self.state_stack.borrow_mut() = state_stack;
         drop(previous_source);
         Ok(())
@@ -510,12 +703,18 @@ impl PyLexerEngine {
                 state
             )));
         }
-        *self.current_state.borrow_mut() = state.to_string();
+        *self.current_state.borrow_mut() = Arc::from(state);
         Ok(())
     }
 
     fn push_state(&self, state: &str) -> PyResult<()> {
-        let curr = self.current_state.borrow().clone();
+        if !self.states.borrow().contains_key(state) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Undefined lexer state {:?}",
+                state
+            )));
+        }
+        let curr = self.current_state.borrow().to_string();
         self.state_stack.borrow_mut().push(curr);
         self.begin(state)
     }
@@ -532,311 +731,267 @@ impl PyLexerEngine {
     }
 
     #[pyo3(signature = (n=1))]
-    fn skip(&self, n: usize) {
-        self.pos.set(self.pos.get() + n);
+    fn skip(&self, n: usize) -> PyResult<()> {
+        let pos = self.pos.get().checked_add(n).ok_or_else(|| {
+            pyo3::exceptions::PyOverflowError::new_err("position exceeds the counter range")
+        })?;
+        self.pos.set(pos);
+        Ok(())
     }
 
     fn token(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        loop {
-            let data_ref = self.data.borrow();
+        'scan: loop {
             let total_chars = self.length.get();
             if self.pos.get() >= total_chars {
-                break;
+                return Ok(None);
             }
             let is_ascii = self.is_ascii.get();
-            let char_indices_borrow = if !is_ascii {
-                Some(self.char_indices.borrow())
-            } else {
-                None
-            };
-            let curr_state = self.current_state.borrow();
-            let states_borrow = self.states.borrow();
-            let state_cfg = match states_borrow.get(&*curr_state) {
-                Some(s) => s,
-                None => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "Undefined lexer state {:?}",
-                        *curr_state
-                    )));
+            let data = self.data.borrow();
+            let indices = self.char_indices.borrow();
+            let surrogate_codepoints = self.surrogate_codepoints.borrow();
+            let state_name = self.current_state.borrow().clone();
+            let states = self.states.borrow();
+            let state = states.get(state_name.as_ref()).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Undefined lexer state {:?}",
+                    state_name
+                ))
+            })?;
+            let mut pos_now = self.pos.get();
+            let mut lineno = self.lineno.get();
+            while pos_now < total_chars {
+                let c = if !self.native_input.get() {
+                    surrogate_codepoints[pos_now]
+                } else if is_ascii {
+                    u32::from(data.as_bytes()[pos_now])
+                } else {
+                    u32::from(indices[pos_now].1)
+                };
+                if !state.ignore.contains(&c) {
+                    break;
                 }
-            };
-            let ignore_str = &state_cfg.ignore;
-
-            // Skip ignored characters
-            let mut p = self.pos.get();
-            let mut line = self.lineno.get();
-            if is_ascii {
-                let bytes = data_ref.as_bytes();
-                while p < total_chars {
-                    let c = bytes[p] as char;
-                    if ignore_str.contains(c) {
-                        if c == '\n' {
-                            line += 1;
-                        }
-                        p += 1;
-                    } else {
-                        break;
-                    }
+                if c == u32::from('\n') {
+                    lineno = lineno.checked_add(1).ok_or_else(|| {
+                        pyo3::exceptions::PyOverflowError::new_err(
+                            "line number exceeds the counter range",
+                        )
+                    })?;
                 }
-            } else {
-                let indices = char_indices_borrow.as_ref().unwrap();
-                while p < total_chars {
-                    let c = indices[p].1;
-                    if ignore_str.contains(c) {
-                        if c == '\n' {
-                            line += 1;
-                        }
-                        p += 1;
-                    } else {
-                        break;
-                    }
-                }
+                pos_now += 1;
             }
-            self.pos.set(p);
-            self.lineno.set(line);
-
-            if p >= total_chars {
-                break;
+            self.pos.set(pos_now);
+            self.lineno.set(lineno);
+            if pos_now >= total_chars {
+                return Ok(None);
             }
-
-            let pos_now = p;
-
             let byte_start = if is_ascii {
                 pos_now
             } else {
-                char_indices_borrow.as_ref().unwrap()[pos_now].0
+                indices[pos_now].0
             };
-            // Anchor at the scan offset while retaining context for ^ and \b.
-            let input = Input::new(data_ref.as_bytes())
-                .range(byte_start..)
-                .anchored(Anchored::Yes);
-
-            // Match active rules
-            let is_inclusive = state_cfg.kind == "inclusive" && *curr_state != "INITIAL";
-
-            let mut matched_rule: Option<(&CompiledRule, usize)> = None; // (&rule, match_len)
-
-            let initial_rules = if is_inclusive {
-                &states_borrow["INITIAL"].rules[..]
+            let c = if !self.native_input.get() {
+                surrogate_codepoints[pos_now]
+            } else if is_ascii {
+                u32::from(data.as_bytes()[pos_now])
             } else {
-                &[]
+                u32::from(indices[pos_now].1)
             };
-            let local_rules = &state_cfg.rules;
-            let (mut initial_idx, mut local_idx) = (0, 0);
-            // Merge the sorted lists without allocating on each scanned token.
-            // INITIAL precedes local rules when priorities are equal.
-            while initial_idx < initial_rules.len() || local_idx < local_rules.len() {
-                let from_initial = initial_idx < initial_rules.len()
-                    && (local_idx == local_rules.len()
-                        || initial_rules[initial_idx].priority >= local_rules[local_idx].priority);
-                let rule = if from_initial {
-                    let r = &initial_rules[initial_idx];
-                    initial_idx += 1;
-                    r
-                } else {
-                    let r = &local_rules[local_idx];
-                    local_idx += 1;
-                    r
-                };
-                if let Some(mat) = rule.regex.find(input.clone()) {
-                    let match_len = if is_ascii {
-                        mat.len()
-                    } else {
-                        data_ref[mat.range()].chars().count()
-                    };
-                    matched_rule = Some((rule, match_len));
+            let error_func = state.error_func.as_ref().map(|f| f.clone_ref(py));
+            let source = self
+                .source_text
+                .borrow()
+                .as_ref()
+                .expect("input has source")
+                .clone_ref(py);
+            let input_revision = self.input_revision.get();
+            let cached_plan = state.plans[usize::from(is_ascii)].as_ref().map(Rc::clone);
+            drop(states);
+            drop(indices);
+            drop(surrogate_codepoints);
+            drop(data);
+            let plan = match cached_plan {
+                Some(plan) => plan,
+                None => self.scan_plan()?,
+            };
+            let mut matched: Option<(Rc<CompiledRule>, usize, Py<PyAny>)> = None;
+            for step in &plan.steps {
+                match step {
+                    ScanStep::Native { regex, rules } if self.native_input.get() => {
+                        let data = self.data.borrow();
+                        let input = Input::new(data.as_bytes())
+                            .range(byte_start..)
+                            .anchored(Anchored::Yes);
+                        if let Some(found) = regex.find(input) {
+                            let value = &data[found.range()];
+                            let end = pos_now
+                                + if is_ascii {
+                                    value.len()
+                                } else {
+                                    value.chars().count()
+                                };
+                            matched = Some((
+                                Rc::clone(&rules[found.pattern().as_usize()]),
+                                end,
+                                PyString::new(py, value).into_any().unbind(),
+                            ));
+                        }
+                    }
+                    _ => {
+                        let rules = match step {
+                            ScanStep::Native { rules, .. } => rules.as_slice(),
+                            ScanStep::PythonRe(rule) => std::slice::from_ref(rule),
+                        };
+                        for rule in rules {
+                            if self.native_input.get()
+                                && !rule.required_prefix.is_empty()
+                                && !self.data.borrow().as_bytes()[byte_start..]
+                                    .starts_with(rule.required_prefix.as_bytes())
+                            {
+                                continue;
+                            }
+                            let matcher = match &rule.matcher {
+                                RuleMatcher::PythonRe(matcher) => matcher,
+                                RuleMatcher::Native(_) => rule.python_match.as_ref().unwrap(),
+                            };
+                            // All input/configuration borrows end before Python.
+                            let found = matcher.bind(py).call1((source.bind(py), pos_now))?;
+                            if !found.is_none() {
+                                let end = found.call_method0("end")?.extract::<usize>()?;
+                                let value = found.call_method1("group", (0,))?.unbind();
+                                matched = Some((Rc::clone(rule), end, value));
+                            }
+                            if self.input_revision.get() != input_revision
+                                || self.pos.get() != pos_now
+                                || *self.current_state.borrow() != state_name
+                            {
+                                continue 'scan;
+                            }
+                            if matched.is_some() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if matched.is_some() {
                     break;
                 }
             }
-
-            if let Some((rule, match_char_len)) = matched_rule {
-                if match_char_len == 0 {
-                    let remainder = PyString::new(py, &data_ref[byte_start..]);
-                    let rule_name = rule.name.clone();
-                    drop(states_borrow);
-                    drop(curr_state);
-                    drop(char_indices_borrow);
-                    drop(data_ref);
-                    // Resolve only when raising, and after releasing scan borrows:
-                    // imports and attribute hooks may replace the input.
-                    let lex_err_cls = py.import("rply.core.lexer_engine")?.getattr("LexError")?;
-                    let err_inst = lex_err_cls.call1((
+            if let Some((rule, end, value)) = matched {
+                if end == pos_now {
+                    let remainder = source.bind(py).get_item(PySlice::new(
+                        py,
+                        pos_now as isize,
+                        total_chars as isize,
+                        1,
+                    ))?;
+                    let cls = py.import("rply.core.lexer_engine")?.getattr("LexError")?;
+                    return Err(PyErr::from_value(cls.call1((
                         format!(
                             "Rule {:?} matched an empty string at pos {}",
-                            rule_name, pos_now
+                            rule.name, pos_now
                         ),
                         remainder,
                         pos_now,
-                    ))?;
-                    return Err(PyErr::from_value(err_inst));
+                    ))?));
                 }
-
-                let end_pos = pos_now + match_char_len;
-                self.pos.set(end_pos);
-
-                let matched_slice = if is_ascii {
-                    &data_ref[pos_now..end_pos]
-                } else {
-                    let byte_end = char_indices_borrow
-                        .as_ref()
-                        .unwrap()
-                        .get(end_pos)
-                        .map(|(b, _)| *b)
-                        .unwrap_or(data_ref.len());
-                    &data_ref[byte_start..byte_end]
-                };
-                let py_val = matched_slice.into_pyobject(py)?.into_any().unbind();
-                let py_lexer_ref = self
+                self.pos.set(end);
+                let owner = self
                     .callback_owner
                     .borrow()
                     .as_ref()
-                    .map(|l| l.clone_ref(py))
+                    .map(|owner| owner.clone_ref(py))
                     .unwrap_or_else(|| py.None());
-
-                // Extract action func
-                let func_opt = rule.func.as_ref().map(|f| f.clone_ref(py));
-                let rule_name = rule.name.clone();
-                drop(states_borrow);
-                drop(curr_state);
-                drop(char_indices_borrow);
-                drop(data_ref);
-
-                let tok = PyToken {
-                    sym_type: rule_name,
-                    value: py_val,
-                    lineno: self.lineno.get(),
-                    lexpos: pos_now,
-                    end: end_pos,
-                    lexer: py_lexer_ref,
-                };
-                let py_tok = Py::new(py, tok)?;
-
-                if let Some(func) = func_opt {
-                    // User callbacks may replace input, including Unicode indexes.
-                    let res = func.call1(py, (&py_tok,))?;
-                    if res.is_none(py) {
-                        // A configuration fallback may retire us inside an action.
-                        if self.stop_requested.get() {
-                            return Ok(None);
-                        }
+                let tok = Py::new(
+                    py,
+                    PyToken {
+                        sym_type: rule.name.clone(),
+                        value,
+                        lineno,
+                        lexpos: pos_now,
+                        end,
+                        lexer: owner,
+                    },
+                )?;
+                if let Some(func) = &rule.func {
+                    let result = func.call1(py, (&tok,))?;
+                    if result.is_none(py) {
                         continue;
                     }
-                    return Ok(Some(res));
-                } else {
-                    return Ok(Some(py_tok.into_any()));
+                    return Ok(Some(result));
                 }
+                return Ok(Some(tok.into_any()));
             }
-
-            let c = if is_ascii {
-                data_ref.as_bytes()[pos_now] as char
-            } else {
-                char_indices_borrow.as_ref().unwrap()[pos_now].1
-            };
-            let is_literal = self.literals.borrow().contains(&c);
-            let error_func_opt = state_cfg.error_func.as_ref().map(|f| f.clone_ref(py));
-
-            if is_literal {
-                drop(states_borrow);
-                drop(curr_state);
-                drop(char_indices_borrow);
-                drop(data_ref);
-                let char_str = c.to_string();
-                let py_val = char_str.clone().into_pyobject(py)?.into_any().unbind();
-                let py_lexer_ref = self
+            if self.literals.borrow().contains(&c) {
+                let owner = self
                     .callback_owner
                     .borrow()
                     .as_ref()
-                    .map(|l| l.clone_ref(py))
+                    .map(|owner| owner.clone_ref(py))
                     .unwrap_or_else(|| py.None());
                 self.pos.set(pos_now + 1);
-
-                let tok = PyToken {
-                    sym_type: char_str,
-                    value: py_val,
-                    lineno: self.lineno.get(),
-                    lexpos: pos_now,
-                    end: pos_now + 1,
-                    lexer: py_lexer_ref,
+                let Some(character) = char::from_u32(c) else {
+                    // A surrogate cannot be a Rust string/symbol name. The
+                    // public Python token can retain this rare literal exactly.
+                    let value = py.import("builtins")?.getattr("chr")?.call1((c,))?;
+                    return Ok(Some(
+                        py.import("rply.core.tokens")?
+                            .getattr("Token")?
+                            .call1((&value, &value, lineno, pos_now, pos_now + 1, owner))?
+                            .unbind(),
+                    ));
                 };
-                return Ok(Some(Py::new(py, tok)?.into_any()));
+                let value = character.to_string();
+                return Ok(Some(
+                    Py::new(
+                        py,
+                        PyToken {
+                            sym_type: value.clone().into(),
+                            value: value.into_pyobject(py)?.into_any().unbind(),
+                            lineno,
+                            lexpos: pos_now,
+                            end: pos_now + 1,
+                            lexer: owner,
+                        },
+                    )?
+                    .into_any(),
+                ));
             }
-
-            if let Some(err_func) = error_func_opt {
-                // Imports, attribute lookup, and the Python factory can all
-                // replace input. Save progress before any of those calls.
-                let input_revision = self.input_revision.get();
-                let lineno = self.lineno.get();
-                let py_lexer_ref = self
+            if let Some(func) = error_func {
+                let owner = self
                     .callback_owner
                     .borrow()
                     .as_ref()
-                    .map(|l| l.clone_ref(py))
+                    .map(|owner| owner.clone_ref(py))
                     .unwrap_or_else(|| py.None());
-
-                let source = self
-                    .source_text
-                    .borrow()
-                    .as_ref()
-                    .expect("input has original source")
-                    .clone_ref(py);
-                drop(states_borrow);
-                drop(curr_state);
-                drop(char_indices_borrow);
-                drop(data_ref);
-                let py_err_tok = py
+                let token = py
                     .import("rply.core.tokens")?
                     .getattr("_LazyErrorToken")?
-                    .call1((source.bind(py), pos_now, lineno, py_lexer_ref, total_chars))?;
-                let res = err_func.call1(py, (py_err_tok,))?;
-                if !res.is_none(py) {
-                    return Ok(Some(res));
-                }
-                if self.stop_requested.get() {
-                    // Finish error progress on the new runtime, without replaying
-                    // the handler or overwriting edits made after the handoff.
-                    let owner = self
-                        .callback_owner
-                        .borrow()
-                        .as_ref()
-                        .map(|l| l.clone_ref(py));
-                    if let Some(owner) = owner {
-                        let owner = owner.bind(py);
-                        if owner.getattr("_input_revision")?.extract::<usize>()? == input_revision
-                            && owner.getattr("pos")?.extract::<usize>()? == pos_now
-                        {
-                            owner.call_method1("skip", (1,))?;
-                        }
-                    } else if self.input_revision.get() == input_revision
-                        && self.pos.get() == pos_now
-                    {
-                        self.pos.set(pos_now + 1);
-                    }
-                    return Ok(None);
+                    .call1((source.bind(py), pos_now, lineno, owner, total_chars))?;
+                let result = func.call1(py, (token,))?;
+                if !result.is_none(py) {
+                    return Ok(Some(result));
                 }
                 if self.input_revision.get() == input_revision && self.pos.get() == pos_now {
                     self.pos.set(pos_now + 1);
                 }
                 continue;
             }
-
-            let remainder = PyString::new(py, &data_ref[byte_start..]);
+            let character = char::from_u32(c)
+                .map(|c| format!("{:?}", c))
+                .unwrap_or_else(|| format!("'\\u{:04x}'", c));
             let message = format!(
-                "Illegal character {:?} at line {}, pos {}",
-                c,
-                self.lineno.get(),
-                pos_now
+                "Illegal character {} at line {}, pos {}",
+                character, lineno, pos_now
             );
-            drop(states_borrow);
-            drop(curr_state);
-            drop(char_indices_borrow);
-            drop(data_ref);
-            // Unhandled lexical error
-            let lex_err_cls = py.import("rply.core.lexer_engine")?.getattr("LexError")?;
-            let err_inst = lex_err_cls.call1((message, remainder, pos_now))?;
-            return Err(PyErr::from_value(err_inst));
+            let remainder = source.bind(py).get_item(PySlice::new(
+                py,
+                pos_now as isize,
+                total_chars as isize,
+                1,
+            ))?;
+            let cls = py.import("rply.core.lexer_engine")?.getattr("LexError")?;
+            return Err(PyErr::from_value(cls.call1((message, remainder, pos_now))?));
         }
-
-        Ok(None)
     }
 
     #[pyo3(signature = (text=None))]

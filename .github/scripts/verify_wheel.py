@@ -65,11 +65,11 @@ def verify_loaded_origins(modules=None, installed_roots=None):
 def verify(backend):
     os.environ["RPLY_BACKEND"] = backend
     import rply
-    from rply import Grammar, Lexer, LexerEngine, LRParser, LRTable, Parser, Token, rule, token
+    from rply import Grammar, Lexer, LexerEngine, LRParser, LRTable, Parser, ProductionProxy, Token, rule, token
     from rply.compat import ply, sly
 
     origin = verify_origin(rply)
-    expected_backend = "python" if backend == "python" else "rust"
+    expected_backend = "rust"
     lexer = LexerEngine()
     lexer.add_rule("INITIAL", "N", r"\d+")
     lexer.set_ignore("INITIAL", " ")
@@ -120,17 +120,16 @@ def verify(backend):
         raise AssertionError("token getter exception was swallowed")
     require(calls == [], "action executed after token conversion failed")
 
-    from rply.backends.python.lexer import PythonLexerEngine
     from rply.core.parser_context import ParseContext
 
-    python_lexer = PythonLexerEngine()
+    regex_lexer = LexerEngine()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
-        python_lexer.add_rule("INITIAL", "SET", r"[a&&b]")
-        python_lexer.add_rule("INITIAL", "X", "x")
+        regex_lexer.add_rule("INITIAL", "SET", r"[a&&b]")
+        regex_lexer.add_rule("INITIAL", "X", "x")
     with warnings.catch_warnings():
         warnings.simplefilter("error", FutureWarning)
-        require([(tok.type, tok.value) for tok in python_lexer.tokenize("&x")]
+        require([(tok.type, tok.value) for tok in regex_lexer.tokenize("&x")]
                 == [("SET", "&"), ("X", "x")], "grouped scanning repeated regex warning")
 
     cached_lexer = LexerEngine()
@@ -174,6 +173,35 @@ def verify(backend):
         require(hook_calls == [[7]], "shared reduction hook received a changed protocol")
     finally:
         ParseContext.reduce = original_reduce
+
+    for frozen_mode in (False, True):
+        saved_proxies = []
+
+        def lazy_pair(proxy):
+            require(type(proxy) is ProductionProxy, "native view changed public proxy type")
+            require(len(proxy) == 2 and proxy.N is proxy[1], "lazy length/named access")
+            proxy[1] += 1
+            saved_proxies.append(proxy)
+            if len(saved_proxies) == 2:
+                symbols = proxy.slice
+                require(isinstance(symbols, list) and proxy.slice is symbols,
+                        "materialized slice is not a stable public list")
+                require(symbols[1].value == proxy.N, "materialization lost a native value edit")
+                symbols[1].value += 1
+            return proxy[1]
+
+        lazy_grammar = Grammar({"N"})
+        lazy_grammar.add_production("s", ["pair", "pair"], lambda proxy: proxy[1] + proxy[2])
+        lazy_grammar.add_production("pair", ["N"], lazy_pair)
+        lazy_grammar.set_start("s")
+        lazy_parser = LRParser(LRTable(lazy_grammar), frozen=frozen_mode)
+        require(lazy_parser.parse([Token("N", 1), Token("N", 2)]) == 6,
+                "lazy/materialized reductions disagree")
+        require(saved_proxies[0] is not saved_proxies[1], "reduction reused a saved proxy")
+        require(saved_proxies[0][:] == [2, 2] and saved_proxies[1][:] == [4, 4],
+                "saved reduction views changed after a later reduction")
+        require(saved_proxies[0].slice is not saved_proxies[1].slice,
+                "separate reductions share a materialized slice")
 
     for arity in range(6):
         expected_values = tuple(object() for _ in range(arity))
@@ -491,16 +519,47 @@ def verify(backend):
     gc.collect()
     require(reference() is None, "self-referential token value cycle leaked")
 
-    # Supported basic inputs must select native in auto; unsupported native
-    # configuration may still hand off to Python under the documented policy.
-    if backend == "auto":
-        import re
-        fallback = LexerEngine()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            fallback.add_rule("INITIAL", "WORD", r"\w+", flags=re.ASCII)
-        require(fallback.backend == "python" and caught, "auto fallback was not reported")
-        require(next(fallback.tokenize("word")).value == "word", "auto fallback parse")
+    import re
+    regex_lexer = LexerEngine()
+    regex_lexer.add_rule("INITIAL", "PAIR", r"(a)\1")
+    regex_lexer.add_rule("INITIAL", "WORD", r"\w+", flags=re.ASCII)
+    require(regex_lexer.backend == "rust", "single-rule matching changed engine")
+    require(next(regex_lexer.tokenize("aa")).type == "PAIR", "backreference matcher")
+    require(next(regex_lexer.tokenize("abc")).type == "WORD", "ASCII matcher")
+    surrogate_lexer = LexerEngine()
+    surrogate_lexer.add_rule("INITIAL", "CHAR", ".")
+    require([(t.value, t.lexpos, t.end) for t in surrogate_lexer.tokenize("\ud800a")] ==
+            [("\ud800", 0, 1), ("a", 1, 2)], "surrogate character positions and EOF")
+    require(surrogate_lexer.length == 2, "surrogate input length")
+
+    lookback_grammar = Grammar({"a", "b"})
+    for lhs, rhs in [("s", ["A"]), ("A", ["a"]), ("B", ["b"]),
+                     ("s", ["a", "A", "B"]), ("B", [])]:
+        lookback_grammar.add_production(lhs, rhs)
+    lookback_grammar.set_start("s")
+    lookback_table = LRTable(lookback_grammar)
+    require("b" not in lookback_table.action[lookback_table.action[0]["a"]],
+            "advanced LR item inherited unrelated transition lookaheads")
+
+    class RecoveryParser(sly.Parser):
+        tokens = {"N", "BAD", "SEMI"}
+
+        @_("N SEMI")
+        def s(self, p):
+            return "normal"
+
+        @_("N error SEMI")
+        def s(self, p):
+            return "recovered"
+
+        def error(self, tok):
+            self.errok()
+
+    require(RecoveryParser().parse(iter([Token("N", 1), Token("BAD", "?"), Token("SEMI", ";")])) ==
+            "recovered", "SLY errok retains grammar recovery")
+    require(Path(rply.__file__).with_name("py.typed").is_file(), "wheel omitted py.typed")
+    require(not any(name.startswith("rply.backends.python") for name in sys.modules),
+            "wheel imported the removed Python backend")
 
     verify_loaded_origins()
     return {"requested_backend": backend, "basic_backend": expected_backend,
@@ -512,20 +571,22 @@ def verify(backend):
                                              "regex-warning-policy", "reduction-hook-protocol",
                                              "scanner-cache-refresh", "scanner-cache-reentry",
                                              "reduction-arguments", "reduction-finalizers",
-                                             "reduction-slice-lifetimes"]}
+                                             "reduction-slice-lifetimes", "surrogate-scanning",
+                                             "compat-recovery-controls", "lalr-lookback-boundaries",
+                                             "lazy-reduction-views"]}
 
 
 def main():
     arguments = argparse.ArgumentParser(description=__doc__)
     mode = arguments.add_mutually_exclusive_group(required=True)
     mode.add_argument("--all", action="store_true")
-    mode.add_argument("--backend", choices=("python", "rust", "auto"))
+    mode.add_argument("--backend", choices=("rust", "auto"))
     args = arguments.parse_args()
     if args.all:
         env = os.environ.copy()
         env.pop("PYTHONPATH", None)
         script = str(Path(__file__).resolve())
-        for backend in ("python", "rust", "auto"):
+        for backend in ("rust", "auto"):
             subprocess.run([sys.executable, "-I", script, "--backend", backend],
                            env=env, cwd=Path.cwd(), check=True, timeout=60)
     else:

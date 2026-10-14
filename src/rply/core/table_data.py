@@ -37,9 +37,9 @@ class _FrozenProduction(Production):
 
 def native_rows(rows):
     """PyO3 consumes dictionaries; frozen public views stay read-only."""
-    if isinstance(rows, dict):
+    if isinstance(rows, dict) and all(row is not None for row in rows.values()):
         return rows
-    return {state: dict(row) for state, row in rows.items()}
+    return {state: {} if row is None else dict(row) for state, row in rows.items()}
 
 
 class ParserMetadata(NamedTuple):

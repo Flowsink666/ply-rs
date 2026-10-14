@@ -6,19 +6,32 @@ from typing import Any, Callable, Optional
 from rply.core.production import ProductionProxy
 
 
+from rply.backends import native_core
+
+TokenCursor = native_core.TokenCursor
+
+
+def _invoke_proxy(function, proxy, symbols):
+    """Retain original symbols in one action frame, including its traceback."""
+    return function(proxy)
+
+
 @dataclass(frozen=True)
 class ParseContext:
     lexer: Any = None
     parser: Any = None
     tracking: bool = True
     error_func: Optional[Callable] = None
+    control: Any = None
+    recovery_style: str = "core"
 
     def reduce(self, production, lhs, popped, stack, slice_items=None):
         """Run one action, optionally using an already assembled proxy slice.
 
-        Either runtime can prepare one fresh LHS/RHS list for the original
-        method. Custom reduction hooks retain RHS-only arguments. Neither path
-        reuses a saved proxy.
+        The native runtime can prepare one fresh LHS/RHS list for this method.
+        Custom reduction hooks retain RHS-only arguments. Ordinary actions use
+        the native lazy view when this method and proxy construction are intact.
+        Every reduction keeps its own proxy.
         """
         if production.func is None:
             return lhs.value

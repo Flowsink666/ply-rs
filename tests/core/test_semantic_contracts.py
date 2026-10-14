@@ -4,7 +4,6 @@ import pytest
 from types import SimpleNamespace
 
 from rply import Grammar, LexerEngine, LRParser, LRTable, Token
-from rply.backends import HAS_RUST_CORE
 
 
 @pytest.mark.parametrize("resolved_zero_override", [False, True])
@@ -176,7 +175,6 @@ def test_missing_token_positions_use_defaults_and_index_fallback(positions, expe
     assert parser.parse([SimpleNamespace(type="N", value=123, **positions)]) == expected
 
 
-@pytest.mark.skipif(not HAS_RUST_CORE, reason="native position fields require unsigned integers")
 @pytest.mark.parametrize("attribute", ["lineno", "lexpos", "index", "end"])
 @pytest.mark.parametrize("exception_type", [RuntimeError, StopIteration])
 def test_native_position_conversion_exceptions_propagate(attribute, exception_type):

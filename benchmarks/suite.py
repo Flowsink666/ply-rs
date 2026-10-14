@@ -16,7 +16,7 @@ import timeit
 from adapters import ROOT, build, load_reference
 from workloads import DEFAULT_SIZES, make_workload
 
-ENGINES = ("python", "rust", "ply", "sly")
+ENGINES = ("rust", "ply", "sly")
 OPERATIONS = ("lex", "parse", "end-to-end", "build")
 
 
@@ -38,7 +38,7 @@ def git_info(directory):
 
 
 def engine_info(engine):
-    if engine in ("python", "rust"):
+    if engine == "rust":
         import rply
         info = {"source": str(Path(rply.__file__).resolve())}
         if engine == "rust":
@@ -75,7 +75,7 @@ def measure(operation, options, byte_count, token_count, throughput=True):
 
 def worker(options):
     engine = options.engine[0]
-    os.environ["RPLY_BACKEND"] = engine if engine in ("python", "rust") else "python"
+    os.environ["RPLY_BACKEND"] = "rust"
     sys.path.insert(0, str(ROOT / "src"))
     cases = {}
     for name in options.case:
@@ -142,7 +142,7 @@ def positive(value):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--engine", nargs="+", choices=ENGINES, default=["python", "rust"])
+    parser.add_argument("--engine", nargs="+", choices=ENGINES, default=["rust"])
     parser.add_argument("--case", nargs="+", choices=tuple(DEFAULT_SIZES), default=list(DEFAULT_SIZES))
     parser.add_argument("--operation", nargs="+", choices=OPERATIONS, default=list(OPERATIONS))
     parser.add_argument("--size", type=positive, help="override each selected workload's default size")

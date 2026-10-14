@@ -4,10 +4,15 @@ from types import MethodType
 
 from rply.backends.rust import RustTableArtifact
 from rply.core.parser_context import ParseContext
+from rply.core import parser_context
 from rply.core.table_data import native_rows
 
 
 _SLICE_REDUCE = ParseContext.reduce
+_NATIVE_PROXY = parser_context.ProductionProxy
+_PROXY_INIT = _NATIVE_PROXY.__init__
+_PROXY_NEW = _NATIVE_PROXY.__new__
+_PROXY_SETATTR = _NATIVE_PROXY.__setattr__
 
 
 class RustParserRuntime:
@@ -15,9 +20,11 @@ class RustParserRuntime:
         self.data = data
         self.module = module
         self.artifact = artifact
-        # Detect stale native interfaces during setup, where fallback is safe.
+        # Detect stale native interfaces before constructing a parser.
         module.LRParserEngine.from_engine
         self._supports_prepared_slice = getattr(module.LRParserEngine, "supports_prepared_slice", False)
+        self._supports_control = getattr(module.LRParserEngine, "supports_recovery_control", False)
+        self._supports_native_proxy = getattr(module.LRParserEngine, "supports_native_proxy", False)
         self._metadata = None
         self._action_snapshot = None
         self._goto_snapshot = None
@@ -49,8 +56,8 @@ class RustParserRuntime:
         self._has_value_actions = any(metadata.value_actions)
         self._value_funcs = [p.func for p in self.productions] if self._has_value_actions else None
         if tables_changed:
-            self._action_snapshot = {state: row.copy() for state, row in data.action.items()}
-            self._goto_snapshot = {state: row.copy() for state, row in data.goto.items()}
+            self._action_snapshot = {state: None if row is None else row.copy() for state, row in data.action.items()}
+            self._goto_snapshot = {state: None if row is None else row.copy() for state, row in data.goto.items()}
             self._num_states = data.num_states
         return engine
 
@@ -77,12 +84,28 @@ class RustParserRuntime:
 
         value_funcs = self._value_funcs if self.data.frozen else (
             [p.func for p in productions] if self._has_value_actions else None)
+        control_args = {}
+        if self._supports_control:
+            control_args = {"control": context.control, "recovery_style": context.recovery_style}
+        elif context.control is not None or context.recovery_style != "core":
+            raise RuntimeError("Native extension lacks recovery controls; rebuild rply._core_rs")
+        if (self._supports_native_proxy and prepared_slice
+                and parser_context.ProductionProxy is _NATIVE_PROXY
+                and _NATIVE_PROXY.__init__ is _PROXY_INIT
+                and _NATIVE_PROXY.__new__ is _PROXY_NEW
+                and _NATIVE_PROXY.__setattr__ is _PROXY_SETATTR):
+            control_args["proxy_context"] = (
+                productions, _NATIVE_PROXY, parser_context._invoke_proxy,
+                context.lexer, context.parser,
+            )
         if prepared_slice:
             return engine.parse(
                 token_stream, reduce_cb, context.error_func, value_funcs,
                 with_stack=True, prepared_slice=True,
+                **control_args,
             )
         return engine.parse(
             token_stream, reduce_cb, context.error_func, value_funcs,
             with_stack=True,
+            **control_args,
         )

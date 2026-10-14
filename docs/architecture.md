@@ -1,249 +1,155 @@
 # Architecture
 
-`rply-next` is the distribution name; `rply` is the Python import package;
-`rply-core` is the Rust crate. `rply._core_rs` is the private native extension.
+`rply-next` is the distribution, `rply` the Python package, `rply-core` the Rust
+crate, and `rply._core_rs` its required private PyO3 extension.
 
 ## Source layout
 
-```text
-src/rply/
-  core/                 Shared models and public engine facades
-    grammar.py          Grammar validation and FIRST/FOLLOW analysis
-    symbols.py          Symbol constants and types
-    tokens.py           Token, lexical rule, and lexical error types
-    lexer_config.py     Shared lexer definitions and immutable state snapshots
-    table_data.py       Backend-neutral parse table data and build results
-    parser_context.py   Per-parse callback context and semantic action handling
-    production.py       Parser stack symbols and semantic action interface
-    conflicts.py        Conflict records
-    lexer_engine.py     Lexer backend dispatch
-    lr_table.py         Table builder backend dispatch
-    lr_parser.py        Parser runtime backend dispatch
-    diagnostics.py      Grammar and conflict reports
-  backends/
-    __init__.py         Extension loading and backend policy
-    interfaces.py       Structural lexer/parser runtime contracts
-    python/             Reference lexer, LALR table builder, and LR runtime
-    rust.py             Python grammar to native table adapter
-    rust_lexer.py       Native lexer runtime adapter
-    rust_parser.py      Native parser runtime adapter
-  modern/               Class-based @token and @rule APIs
-  compat/
-    ply/                PLY module API and callback adapters
-    sly/                SLY class API, decorators, and callback adapters
-rust/src/               Native grammar, lexer, table builder, and runtime
-tests/
-  core/                 Models, engines, backend policy, and regressions
-  modern/               Modern public API
-  compat/               PLY and SLY API adapters
-  differential/         Optional comparisons against upstream clones
-  fixtures/             Shared grammar specifications
-examples/               Runnable public API examples
-docs/research/          Background research, separate from implementation docs
-upstream/               Independent reference clones and reproduction notes
-```
+- `src/rply/core/`: public models, grammar registration/inspection, snapshots,
+  semantic action contexts, diagnostics, and native engine facades.
+- `src/rply/backends/`: extension loading and Python/native adapters.
+- `src/rply/modern/`: class-based lexer/parser APIs and decorators.
+- `src/rply/compat/`: PLY module and SLY class APIs.
+- `rust/src/`: scanning, LALR construction, parser execution, lazy reduction views
+  and Python ownership.
+- `tests/`: public contracts, independent small models and upstream comparisons.
+- `benchmarks/`: shared workloads with Rust, upstream PLY and upstream SLY adapters.
 
-The modern and compatibility APIs build shared grammar and engine objects.
-Public core engines select and hold backend runtimes through composition;
-they do not inherit reference implementations. Reference algorithms do not
-import the native extension or compatibility packages. PLY callbacks receive
-PLY tokens from their adapter. A callback's lexer owner is the public facade,
-which forwards position and state operations to its active runtime.
+There is one execution engine. `RPLY_BACKEND=rust` and `auto` select it;
+`RPLY_BACKEND=python` raises ValueError. Missing extensions raise ImportError;
+initialization failures propagate. No source-only fallback or lexer handoff exists.
+Python grammar models, production proxies and API adapters remain intentional.
+`py.typed` is included in the installed package.
 
-`LexerConfig` stores definitions separately from scan state. Only the active
-runtime owns input, position, line number, current state, and the state stack.
-Public patterns retain Python regex validation; native compilation also applies
-its own supported syntax and flags. Validation does not construct a Python
-scanning runtime.
-The Python scanner combines only compatible capture-free rules. Global inline
-flags and ambiguous nested-set/set-operation syntax remain standalone so internal
-compilation does not repeat or relocate registration diagnostics. This check
-does not change the caller's warning filters. Normal registration continues to
-validate each original pattern under the caller's current warning policy.
-The scanner keeps the current state's matchers and ignored characters ready for
-ordinary string inputs. State setters invalidate this cache. Shared configuration
-has a separate scanning revision so changing ignored characters refreshes the
-cache without rebuilding regexes. Rule/state registration still invalidates all
-compiled state matchers, including inclusive states. String subclasses retain
-the uncached lookup path and original reference lifetime. Matcher entries record
-whether group-index dispatch is needed instead of checking their length per token.
-`capture_state()` returns an immutable `LexerSnapshot`; `restore_state()`
-applies it to a runtime with matching state definitions. PLY clones use this
-interface instead of accessing backend state fields. The public `state_stack`
-is a mutable sequence view over the active runtime, including after fallback.
-Snapshots validate every field before changing input. Positions and line numbers
-use nonnegative platform-sized counters on both backends; zero line numbers and
-positions past EOF remain valid. A rejected restoration keeps the original
-runtime state. Native restoration also validates names against native states.
+## Regex matching and lexer state
 
-Actions and error handlers may call `input()` or `restore_state()`. After an
-ignored callback the scanner resumes from the current input, position, and state;
-a returned token is delivered before the next scan resumes. Native scanners
-release input and Unicode index borrows before user callbacks. An input revision
-distinguishes replacing input from advancing within the same input, so error
-recovery does not automatically skip the first character of a replacement.
+Each original rule is compiled with the active interpreter's Python `re` once,
+under the caller's warning/error policy. `core/regex_support.py` translates a
+conservative subset of CPython's parsed syntax into an equivalent native pattern.
+If a construct, flag, interpreter syntax node or native compilation limit cannot
+be handled, that rule retains its compiled Python match method in `RuleMatcher`.
+The scanner remains Rust regardless of individual matcher selection.
 
-A native configuration failure in auto mode transfers a snapshot to a Python
-runtime. If registration fails inside a callback, the callback finishes once
-and the retired scanner yields control before scanning the next token. Runtime
-and action exceptions continue to propagate without replay.
-Registration prepares and validates a shared definition before native setup,
-and commits it after setup or a successful handoff. Strict rejection, a warning
-promoted to an exception, or failed handoff preparation leaves the original
-definitions and runtime selected. Native rule compilation precedes state creation.
-Configure lexer definitions through registration methods; exposed definition
-maps are available for inspection, not direct updates to native configuration.
+The translation preserves declaration priority, alternatives, quantifier
+preferences and scoped flags. ASCII classes are expanded while keeping Unicode
+character matching for dot and negated classes. Unicode categories, case folding, lookaround, backreferences and unsupported
+constructs use Python matching where equivalence cannot be established. An
+ASCII-input-only translation accelerates Unicode classes/boundaries on entirely
+ASCII sources; a separate plan uses Python semantics again for Unicode sources.
+Original character-set diagnostics occur once; reparsing for translation does
+not repeat them. Python matchers receive the original source and character
+position, preserving preceding context for anchors and lookbehind. Lone surrogate
+inputs use the authoritative Python matchers for every rule, including rules
+normally compiled natively. Their scan buffer keeps one entry per original
+Python code point; surrogate values remain distinct from U+FFFD in ignored
+characters and literals. Empty matches remain lexical errors.
 
-Both table builders return `TableBuildResult` with the same `ParseTableData`
-structure. The facade exposes its action/goto dictionaries and diagnostics;
-the Rust adapter owns the native table and cache-validation snapshots. Public
-code passes that artifact through without inspecting native details.
-The native builder uses canonical LR(0) item sets to identify states and keeps
-an ordered closure view during construction. ACTION entries and conflict
-decisions follow that view, including when several reductions compete with
-one shift; sorting items by production number can change the selected action.
-`ParseTableData.runtime_metadata()` describes resolved production names, lengths,
-action presence, and value-call flags with named immutable fields. The native
-adapter consumes that description without re-inferring rule bindings.
+State plans merge inclusive INITIAL/local definitions in stable priority order,
+with INITIAL first on ties. Consecutive Native rules of equal priority use a
+multi-pattern automaton with anchored, leftmost-first semantics. Pattern IDs map
+back to their original rules. Python matchers are plan boundaries. If combined
+compilation exceeds a resource limit, the plan retains individual native matchers.
+Rule/state registration invalidates both input-mode plans, including inclusive
+dependants. Required literal prefixes can reject Python matcher candidates without
+calling Python; such prefilters are derived from the authoritative parsed syntax.
 
-`ParseContext` supplies the lexer, parser owner, tracking option, and error
-callback for each parse invocation. Both runtimes use it for proxy actions;
-native value-style actions retain their direct-call path. Modern and PLY APIs
-pass their public parser as an explicit parse argument, and recursive calls keep independent
-contexts instead of modifying a runtime's callback owner.
-The preassembled-slice path in both runtimes is restricted to the original shared
-`ParseContext.reduce` method by bound-method identity. A replacement or decorated
-hook retains the four-argument protocol and RHS-only symbols, as do custom
-contexts. Exceptions propagate without a retry. Each reduction keeps a separate
-proxy/slice, and consumed Token fields remain snapshots. Runtimes query the
-actual lookahead ACTION before reduction; they do not add PLY defaulted-state
-reductions. This does not make semantic actions transactional: a later input
-error can still follow actions on an earlier valid prefix.
+`LexerConfig` owns definitions; the native scanner owns input, position, line,
+state, stack and input revision. Definitions commit only after native setup.
+`LexerSnapshot` validates all fields before replacing state. Position and line
+counters are nonnegative platform-sized integers. Mutable stack views continue
+to reference the same runtime. Actions and error handlers can change input,
+restore snapshots, register rules and scan recursively without callback replay.
+Input revision distinguishes replacement from ordinary advancement.
 
-The native adapter opts into prepared slices only when its extension advertises
-support. Older extensions and custom contexts keep RHS-only callback arguments.
-Native proxy reductions move the detached LHS into its Python wrapper, prepare
-one fresh slice, and copy the result back into the native stack after the action.
-That final copy preserves the independence of saved slices. Stack borrows end
-before creating Python objects or calling user code. Value-style reductions use
-direct zero-to-three-argument calls and tuple construction for larger arities;
-argument identity, default values, positions, and exception behavior are retained.
-An independent RHS list and a reference to the initial LHS value retain their
-original release timing. Slice edits cannot release RHS values early, and failed
-actions retain the RHS through their traceback. Old native/Python release-order
-differences remain explicit behavioral tests instead of being normalized away.
+Python match methods, error factories, imports and callbacks run after scanner
+borrows end. Lazy error tokens retain the original Python input and defer suffix
+slicing until read. Assignments commit before releasing the original source;
+finalizers can inspect committed state and replace input. Native clear operations
+release Python references after their RefCell/PyClass borrows end. Matcher method
+references, actions, owners and sources participate in cyclic GC.
 
-Native lexer tokens are read through their Rust fields by the native parser;
-other token classes continue to use the Python attribute protocol. Both paths
-observe current token values and positions, including lexer callback edits.
-Token iteration and token creation still involve Python objects.
+Modern lexers declare states, state-specific ignored characters and bound error
+handlers. State operations and snapshots are forwarded by the high-level instance;
+its callback tokens expose that instance as their lexer owner.
 
-The native table retains shared, immutable runtime ACTION/GOTO rows. Parser
-instances share these rows through `Arc`; production callback metadata remains
-specific to each parser. The public Python table dictionaries remain available
-for inspection and editing. Snapshots detect edits before parser construction
-and at the start of subsequent parse calls, including edits to existing parser
-instances. Changed rows use the dictionary-based native constructor; unchanged
-rows retain their current native table. Each parse also checks production names,
-lengths, action presence, and action style. Metadata changes create an engine
-sharing the current rows through `Arc`, including previously edited rows.
-Unchanged parses only compare snapshots and metadata, without reconstructing
-rows. A recursive parse may refresh the runtime; the outer invocation keeps its
-own native engine reference. Configure tables and productions between parse
-calls; mutation during an active invocation is not a supported update contract.
+## Tables and diagnostics
 
-`LRParser(table, frozen=True)` and `parser.freeze()` provide an explicit static
-mode; the modern `Parser` also exposes `freeze()` and `frozen`. Freezing snapshots
-the current ACTION/GOTO rows, runtime production fields, name maps, and callback
-bindings. Public runtime views are read-only, and edits to the original table
-or productions no longer affect this parser. Callback state and error handlers
-remain live. The original `parser.table` is still the editable source table.
-Freezing an existing instance prepares a replacement runtime before publishing
-the snapshot, so a failed preparation preserves the editable instance. Native
-static parses reuse cached metadata, value callbacks, and their engine without
-full-table comparisons. Dynamic mode retains the snapshot checks above.
-LR items and conflict diagnostic objects remain shared inspection artifacts;
-freezing isolates the data consumed during parsing rather than copying the
-entire diagnostic graph. An unset name map keeps automatic proxy-name generation.
+Canonical LR(0) sets identify states, while ordered closures govern state
+inspection and ACTION conflict decisions. Symbol discovery is deterministic.
+FIRST/FOLLOW, ordered lookaheads, full LRItem state lists and conflict candidates
+are exported to shared Python models. Candidate records retain the actual item
+that supplied each selected ACTION; reduce/reduce candidates remain Productions.
+LRItem links and production/source locations support complete diagnostic reports.
+Repeated builds update existing lookahead lists in place.
+LOOKBACK/INCLUDES originate at dot-zero items; advanced items with the same LHS
+cannot acquire the follow set of an unrelated nonterminal transition.
 
-Production precedence is resolved during rule registration and passed unchanged
-to the native builder, including valid zero precedence. The native adapter keeps
-empty numeric tiers when declarations leave gaps, so terminal shift precedence
-and production reduction precedence stay on the same scale. ACTION entries preserve
-three states: missing token type, an explicit forbidden action, and a valid
-shift/reduce/accept action. Literal-value fallback is permitted only for a
-missing type. Normal parsing and error recovery use the same lookup contract.
-Recovery preserves the real lookahead while the LR loop reduces and shifts a
-synthetic `error` symbol, so completed statements survive subsequent errors.
-Three successful input shifts re-enable error callbacks; the synthetic shift
-does not count. Input is discarded only while the stack already contains the
-error symbol awaiting synchronization. Generic token `type`/`value` property
-failures propagate unless the property is absent. Only exhaustion of the input
-iterator is interpreted as EOF.
-Native position fields remain nonnegative machine integers; getter and integer
-conversion failures propagate instead of silently substituting a position.
-PLY counts its synthetic error shift towards callback suppression, so callback
-frequency can differ even when both engines produce the same recovered result.
+The Rust artifact owns shared native ACTION/GOTO rows and snapshots of public
+Python dictionaries. Parser instances share rows through Arc. Table edits before
+construction or between parse calls compile replacement native rows. Production
+names, lengths, bindings and action styles refresh independently. An outer parse
+retains its engine if a recursive invocation refreshes the facade.
 
-Both lexers create lazy error tokens that retain the original input and starting
-position. Their `value` getter materializes and caches the remaining text on
-first access; assignment overrides it without slicing. A callback can replace
-the input or retire the native runtime while a saved error token still refers
-to the original text. Normal native tokens retain their direct parser field path.
-Assignments made during suffix slicing remain effective. An explicit value
-assignment commits before releasing the retained source, so a source finalizer
-observes the new value and may assign it again.
-Error-token factories run after native scan borrows are released, with progress
-captured beforehand. Input replacement and restoration release the previous
-Python source only after the whole state transition is committed; a source
-finalizer can replace input without a borrow conflict or mixed snapshot fields.
-PLY and SLY wrappers also defer error suffixes while retaining their public
-token classes. Reading `value` caches the suffix; copying or serialization
-materializes it and stores public fields, preserving legacy token pickles.
-Subtype value descriptors and extra slots remain independent of the deferred
-value storage; state export reads each public descriptor once.
-Native scans resolve the current `LexError` class only on an unhandled error
-or an empty rule match, after retaining error metadata and releasing borrows.
-Python and native tokens compare by type/value across implementations, and
-unsupported comparison types return `NotImplemented`.
+Runtime tables intern symbols as u32 IDs and use sorted compact integer rows.
+Lookahead type/literal IDs are cached while the parser reduces on that token;
+production GOTO IDs are compiled with metadata. Native token/symbol names share
+Arc strings rather than allocating a String for each stack snapshot or reduction.
+Generic Python token attributes still follow the public protocol. Missing ACTION,
+explicit forbidden ACTION and valid ACTION remain separate; literal fallback is
+allowed only for a missing type. Unknown symbols are ordinary missing actions.
 
-Native tokens, parsed symbols, and saved parser stacks expose their Python
-references to cyclic garbage collection. This permits owner/token and saved
-proxy/value cycles to be reclaimed. Clearing moves references out under a short
-borrow and drops them after the borrow ends, so finalizers can inspect objects
-or replace lexer input without conflicting with the cleanup borrow.
+## Actions, freezing and recovery
 
-Productions without actions propagate values internally. Value-style actions
-receive RHS values directly; native parsing calls them without constructing
-stack-symbol objects or a production proxy. Proxy-style actions keep the full
-compatibility interface. A None return retains the current LHS value: initially
-the first RHS value, or None for an empty production. Proxy actions can replace
-that value through `p[0]`. Callables are resolved per parse so rebinding remains
-effective, and exceptions propagate after a single invocation.
+`ParseContext` owns per-invocation lexer/parser owners, error callbacks and action
+handling. Value actions call Python functions directly. Ordinary proxy actions
+receive a fresh Python ProductionProxy backed by a native reduction view.
+Integer and named value access read detached Rust symbols directly; `p.slice`,
+value slicing and position inspection materialize Python symbols and a real list
+on demand. Subsequent edits share those same materialized objects. Native symbols
+and already materialized symbols both participate in cyclic GC; saved views can
+also be inspected from another thread.
 
-The existing `rply.core.lexer_engine`, `rply.core.lr_parser`, and
-`rply.core.lr_table` import paths remain supported. Shared types are
-re-exported there. `ProductionProxy` retains its existing access helpers for
-callers; the SLY adapter provides SLY-specific RHS indexing and position
-attributes. Backend modules are implementation details.
+The native proxy path requires the original reduction method and unmodified
+proxy construction. Custom contexts, decorated hooks and customized constructors
+retain the prepared-slice/RHS-only callback path. One Python action frame retains
+the original symbols in exception tracebacks even if an action deletes its slice
+or discards its proxy argument. Exceptions propagate once, saved slices remain
+detached, and consumed token values/positions remain snapshots. RHS and LHS
+default values retain their established native release points; RHS finalizers can
+edit LHS positions before its runtime snapshot is taken.
 
-## Backend policy
+Core and modern parsers support freezing. `Parser(frozen=True)` and a modern class
+attribute `frozen = True` select detached read-only runtime tables/bindings. An
+explicit constructor argument overrides the class default. Error handlers and
+callback instance state remain live. Editable mode continues to observe source
+edits; frozen mode reuses compiled metadata and native rows without full checks.
 
-Set `RPLY_BACKEND` **before importing `rply`**:
+Each invocation has its own native recovery control and shared native token cursor. `errok()`
+clears suppression; `restart()` resets the state/symbol stack at a safe boundary.
+PLY `parser.token()` and SLY `self.tokens` advance that cursor. Recursive calls
+restore the outer session even after exceptions. PLY/SLY error callbacks can
+supply replacement lookahead tokens; PLY requires errok(), whereas SLY accepts
+the returned token directly. SLY errok() alone keeps grammar-based error
+recovery, and restart() alone does not enable PLY replacement tokens.
+EOF callbacks receive None. Core callbacks
+retain result-return behavior unless they explicitly request recovery.
 
-| Value | Behavior |
-| --- | --- |
-| `auto` (default) | Use the extension when importable; otherwise use Python. Native setup failures emit a warning and select Python for that component. |
-| `python` | Use Python without loading the extension. |
-| `rust` | Require the extension and reject native setup failures. Useful for verifying native coverage. |
+Grammar recovery preserves real lookahead while reducing/shifting a synthetic
+error symbol and keeps completed statements across successive errors. Three
+real input shifts re-enable callbacks; the synthetic shift does not count.
+This documented counting policy differs from upstream PLY. Defaulted-state
+reductions are not added. Configure runtime tables between invocations;
+mutating tables during an active parse is unsupported.
 
-`LexerEngine.backend`, `LRTable.backend`, and `LRParser.backend` report the
-implementation actually selected by each component. In automatic mode a
-Python-only regex can make the lexer fall back while the parser stays native.
-Runtime and user callback exceptions propagate; they do not trigger a replay
-with another backend.
+SLY parser rules follow MRO attribute resolution. Overrides retain rule position,
+diamond inheritance contributes each group once, and same-name decorated rule
+chains retain all alternatives. Undecorated overrides suppress inherited groups.
 
-Python and Rust have different regex engines and may support different
-patterns or flags. The compatibility tests cover specific cases, rather than
-guaranteeing every upstream feature. Rust table diagnostics currently expose
-state counts and conflict metadata without Python LR item candidates.
+## Validation
+
+Strict CI requires the native extension and pinned upstream clones and permits
+no skipped contracts. Both auto/rust policy names are covered by subprocess
+checks; there is one full runtime matrix. Independent lexer/parser models and
+upstream comparisons remain authoritative evidence. Installed-wheel checks run
+outside the checkout with isolated Python and verify module origins, py.typed,
+public API behavior, reentry, recovery, snapshots, freezing, errors and GC.

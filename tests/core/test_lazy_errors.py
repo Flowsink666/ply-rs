@@ -218,7 +218,7 @@ def test_original_input_reference_participates_in_garbage_collection():
     assert reference() is None
 
 
-def test_unread_error_token_survives_callback_backend_fallback():
+def test_unread_error_token_survives_callback_rule_registration():
     if importlib.util.find_spec("rply._core_rs") is None:
         pytest.skip("native extension unavailable")
     result = run_python("auto", r'''
@@ -236,7 +236,7 @@ with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')
     tokens = list(lexer.tokenize('?旧输入'))
 assert [tok.value for tok in tokens] == ['abc']
-assert lexer.backend == 'python' and len(caught) == 1
+assert lexer.backend == 'rust' and len(caught) == 0
 assert len(saved) == 1 and saved[0].value == '?旧输入'
 ''')
     assert result.returncode == 0, result.stderr
@@ -340,7 +340,6 @@ def test_error_token_factory_changes_preserve_progress(
     monkeypatch, replace_input, factory_error, text,
 ):
     import rply.core.tokens as token_module
-    import rply.backends.python.lexer as python_lexer_module
 
     lexer = LexerEngine()
     lexer.add_rule("INITIAL", "WORD", r"[a-z]+")
@@ -358,7 +357,6 @@ def test_error_token_factory_changes_preserve_progress(
         return factory(*args, **kwargs)
 
     monkeypatch.setattr(token_module, "_LazyErrorToken", reentrant_factory)
-    monkeypatch.setattr(python_lexer_module, "_LazyErrorToken", reentrant_factory)
     lexer.input(text)
     if factory_error:
         with pytest.raises(RuntimeError, match="error-token factory failed"):

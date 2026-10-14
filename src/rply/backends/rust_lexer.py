@@ -6,7 +6,6 @@ class RustLexerRuntime:
         self.engine = module.LexerEngine()
         # Reject stale extensions at setup rather than failing during a handoff.
         self.engine.state_stack
-        self.engine.stop_requested
         self.engine.input_revision
         self.engine.restore_state
         self.engine.callback_owner = callback_owner
@@ -53,8 +52,8 @@ class RustLexerRuntime:
     def state_stack(self, value):
         self.engine.state_stack = value
 
-    def configure(self, method, *args):
-        getattr(self.engine, method)(*args)
+    def configure(self, method, *args, **kwargs):
+        getattr(self.engine, method)(*args, **kwargs)
 
     @property
     def input_revision(self):
@@ -63,9 +62,6 @@ class RustLexerRuntime:
     def restore_state(self, state):
         self.engine.restore_state(state.data, state.pos, state.lineno,
                                   state.current_state, list(state.state_stack))
-
-    def retire(self):
-        self.engine.stop_requested = True
 
     def input(self, text):
         self.engine.input(text)

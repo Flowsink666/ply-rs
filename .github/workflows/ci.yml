@@ -99,17 +99,6 @@ jobs:
           RPLY_BACKEND: rust
         run: python -m pytest --junitxml=reports/pytest-rust.xml
 
-      - name: Run pytest (Pure-Python backend)
-        env:
-          RPLY_BACKEND: python
-        run: python -m pytest --junitxml=reports/pytest-python.xml
-
-      - name: Run pytest (Auto backend representative)
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
-        env:
-          RPLY_BACKEND: auto
-        run: python -m pytest --junitxml=reports/pytest-auto.xml
-
       - name: Upload test reports, including skip reasons
         if: always()
         uses: actions/upload-artifact@v4
@@ -119,7 +108,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Verify benchmarks workload consistency
-        run: python benchmarks/suite.py --engine python rust ply sly --check
+        run: python benchmarks/suite.py --engine rust ply sly --check
 
   wheel-contracts:
     name: Installed release wheel contracts (Python 3.14)

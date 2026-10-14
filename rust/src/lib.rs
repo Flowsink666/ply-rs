@@ -2,13 +2,16 @@ pub mod grammar;
 pub mod lexer;
 pub mod lr_table;
 pub mod parser;
+pub mod reduction;
 pub mod symbols;
 
 use grammar::Grammar;
 use lexer::{PyLexerEngine, PyToken};
 use lr_table::LRTable;
-use parser::{LRParserEngine, ParserTables, PyParsedSymbol};
+use parser::{LRParserEngine, ParserControl, ParserTables, PyParsedSymbol, TokenCursor};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use reduction::{ProductionView, ReductionData};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -61,6 +64,16 @@ impl PyGrammar {
             .map_err(pyo3::exceptions::PyValueError::new_err)
     }
 
+    #[getter]
+    fn first(&self) -> HashMap<String, HashSet<String>> {
+        self.inner.first.clone()
+    }
+
+    #[getter]
+    fn follow(&self) -> HashMap<String, HashSet<String>> {
+        self.inner.follow.clone()
+    }
+
     fn build_table(&mut self) -> PyResult<PyLRTable> {
         let table =
             LRTable::build(&mut self.inner).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -110,18 +123,29 @@ impl PyLRTable {
     }
 
     #[getter]
-    fn conflicts(&self) -> Vec<HashMap<String, String>> {
+    fn states(&self) -> Vec<Vec<(usize, usize)>> {
+        self.inner.ordered_states.clone()
+    }
+
+    #[getter]
+    fn lookaheads(&self) -> HashMap<(usize, usize), Vec<String>> {
+        self.inner.lookaheads.clone()
+    }
+
+    #[getter]
+    fn conflicts(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         self.inner
             .conflicts
             .iter()
             .map(|c| {
-                let mut map = HashMap::new();
-                map.insert("kind".to_string(), c.kind.clone());
-                map.insert("state".to_string(), c.state.to_string());
-                map.insert("token".to_string(), c.token.clone());
-                map.insert("resolution".to_string(), c.resolution.clone());
-                map.insert("reason".to_string(), c.reason.clone());
-                map
+                let map = PyDict::new(py);
+                map.set_item("kind", &c.kind)?;
+                map.set_item("state", c.state)?;
+                map.set_item("token", &c.token)?;
+                map.set_item("resolution", &c.resolution)?;
+                map.set_item("reason", &c.reason)?;
+                map.set_item("candidates", &c.candidates)?;
+                Ok(map.into_any().unbind())
             })
             .collect()
     }
@@ -139,6 +163,10 @@ fn _core_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLRTable>()?;
     m.add_class::<PyParsedSymbol>()?;
     m.add_class::<LRParserEngine>()?;
+    m.add_class::<ParserControl>()?;
+    m.add_class::<TokenCursor>()?;
+    m.add_class::<ProductionView>()?;
+    m.add_class::<ReductionData>()?;
     m.add_class::<PyToken>()?;
     m.add_class::<PyLexerEngine>()?;
     Ok(())
@@ -244,7 +272,10 @@ mod tests {
             .find_map(|(state, row)| (row.get("LT") == Some(&None)).then_some(*state))
             .expect("nonassoc conflict must forbid LT");
         let runtime = ParserTables::new(table.states.len(), table.action, table.goto);
-        assert_eq!(runtime.action[forbidden_state].get("LT"), Some(&None));
+        assert_eq!(
+            runtime.lookup_type(forbidden_state, runtime.symbols.get("LT").copied()),
+            Some(None)
+        );
     }
 
     #[test]
