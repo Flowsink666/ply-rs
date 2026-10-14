@@ -1,6 +1,7 @@
 """Shared token, lexical rule, and error types."""
 
 import re
+import sys
 from typing import Any, Callable, Optional, Pattern
 
 
@@ -46,9 +47,53 @@ class Token:
         return f"Token(type={self.type!r}, value={self.value!r}, lineno={self.lineno}, pos={self.lexpos})"
 
     def __eq__(self, other: Any) -> bool:
-        if isinstance(other, Token):
-            return self.type == other.type and self.value == other.value
-        return False
+        if not isinstance(other, Token):
+            # Recognize the other public token implementation without loading
+            # the extension in explicitly selected Python mode.
+            native = sys.modules.get("rply._core_rs")
+            if native is None or not isinstance(other, getattr(native, "Token", ())):
+                return NotImplemented
+        return self.type == other.type and self.value == other.value
+
+
+class _LazyErrorToken(Token):
+    """Keep the original input alive and slice its suffix only when requested."""
+
+    __slots__ = ("_source", "_start", "_value")
+
+    def __init__(self, source: str, lexpos: int, lineno: int = 1, lexer: Any = None,
+                 end: Optional[int] = None):
+        self.type = "error"
+        self._source = source
+        self._start = lexpos
+        self._value = None
+        self.lineno = lineno
+        self.lexpos = lexpos
+        # Engines already know the input length. Reusing it also avoids running
+        # arbitrary str-subclass __len__ code while creating an error token.
+        self.end = str.__len__(source) if end is None else end
+        self.lexer = lexer
+
+    @property
+    def value(self) -> Any:
+        source = self._source
+        if source is not None:
+            materialized = source[self._start:]
+            # String-subclass slicing can assign value while this read is in
+            # progress. Keep that assignment instead of caching over it.
+            if self._source is source:
+                self._value = materialized
+                self._source = None
+        return self._value
+
+    @value.setter
+    def value(self, value: Any) -> None:
+        source = self._source
+        self._source = None
+        self._value = value
+        # Release the original input after the assignment is visible to its
+        # finalizer, which may read or assign this token's value again.
+        del source
 
 
 class LexRule:

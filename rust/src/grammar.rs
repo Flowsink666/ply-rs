@@ -311,7 +311,13 @@ impl Grammar {
                         let rest = &p.prod[i + 1..];
                         let rest_first = self.compute_sequence_first_internal(rest, &first_map);
 
-                        let parent_follow = follow.get(&p.name).cloned().unwrap_or_default();
+                        let needs_parent = rest_first.contains("") || rest.is_empty();
+                        let parent_follow = if needs_parent {
+                            follow.get(&p.name).cloned().unwrap_or_default()
+                        } else {
+                            HashSet::new()
+                        };
+
                         let target_follow = follow.get_mut(sym).unwrap();
                         let old_len = target_follow.len();
 
@@ -321,7 +327,7 @@ impl Grammar {
                             }
                         }
 
-                        if rest_first.contains("") || rest.is_empty() {
+                        if needs_parent {
                             target_follow.extend(parent_follow);
                         }
 

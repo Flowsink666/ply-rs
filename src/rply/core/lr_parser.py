@@ -13,22 +13,45 @@ from rply.core.table_data import ParseTableData
 
 
 class LRParser:
-    def __init__(self, table: LRTable, error_func: Optional[Callable[..., Any]] = None):
+    def __init__(self, table: LRTable, error_func: Optional[Callable[..., Any]] = None,
+                 *, frozen: bool = False):
         self.table = table
         self._data = ParseTableData.from_table(table)
+        if frozen:
+            self._data = self._data.frozen_copy()
         self.error_func = error_func
         self._runtime: ParserRuntime
-        self.backend = "python"
-        data = self._data
+        self.backend, self._runtime = self._create_runtime(self._data)
+
+    def _create_runtime(self, data):
         if HAS_RUST_CORE:
             try:
-                self._runtime = RustParserRuntime(data, native_core, getattr(table, "runtime_artifact", None))
+                runtime = RustParserRuntime(data, native_core, getattr(self.table, "runtime_artifact", None))
             except Exception as error:
                 fallback("parser", error)
             else:
-                self.backend = "rust"
-                return
-        self._runtime = PythonLRParser(data)
+                return "rust", runtime
+        return "python", PythonLRParser(data)
+
+    @property
+    def frozen(self):
+        return self._data.frozen
+
+    def freeze(self):
+        """Compile a detached, read-only snapshot and return this parser.
+
+        Source-table and production edits made afterward do not affect it.
+        Callback state and the per-call lexer/parser context remain live.
+        """
+        if not self.frozen:
+            data = self._data.frozen_copy()
+            backend, runtime = self._create_runtime(data)
+            self._data, self._runtime, self.backend = data, runtime, backend
+        return self
+
+    def _require_editable(self):
+        if self.frozen:
+            raise TypeError("Frozen parser tables and productions cannot be replaced")
 
     @property
     def productions(self):
@@ -36,6 +59,7 @@ class LRParser:
 
     @productions.setter
     def productions(self, value):
+        self._require_editable()
         self._data.productions = value
 
     @property
@@ -44,6 +68,7 @@ class LRParser:
 
     @action.setter
     def action(self, value):
+        self._require_editable()
         self._data.action = value
 
     @property
@@ -52,6 +77,7 @@ class LRParser:
 
     @goto.setter
     def goto(self, value):
+        self._require_editable()
         self._data.goto = value
 
     def parse(self, token_stream: Union[Iterator[Any], Sequence[Any]],

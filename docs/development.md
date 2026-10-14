@@ -65,6 +65,46 @@ missing clones produce explicit skips. Follow [the upstream instructions](../ups
 to reproduce their pinned revisions. Run only these tests with
 `python -m pytest -q -m differential`, or omit them with `-m 'not differential'`.
 
+The [runtime contracts](../tests/CONTRACTS.md) define the behavior that changes
+must preserve. Bounded operation sequences use independent small models; the
+recovery suite checks all 3280 short inputs in editable and frozen modes and
+also compares independently built PLY tables. Known callback/precedence policy
+differences are asserted explicitly.
+
+CI enables strict prerequisites. To reproduce that gate after building the
+extension and checking out both references:
+
+```powershell
+$env:RPLY_BACKEND = 'rust'
+python -m pytest -q --strict-prerequisites --junitxml=target/contracts-rust.xml
+$env:RPLY_BACKEND = 'python'
+python -m pytest -q --strict-prerequisites --junitxml=target/contracts-python.xml
+Remove-Item Env:RPLY_BACKEND
+```
+
+`RPLY_STRICT_TESTS=1` enables the same gate. Strict runs require a loadable native
+extension even in Python mode because subprocess contracts exercise native and
+auto selection. Basic lexer, table, and parser selection is checked up front;
+auto-mode tests may still exercise supported fallback behavior afterward.
+Missing prerequisites and undeclared collection/execution skips fail. Exact
+backend-specific node/reason permissions in `tests/conftest.py` retain legitimate
+Python-mode skips, with their reasons in JUnit reports. Local non-strict runs
+keep optional references optional.
+
+## Verify an installed wheel
+
+CI builds a release wheel, installs it in a fresh virtual environment, and runs
+`.github/scripts/verify_wheel.py` from a directory outside the checkout. The
+script needs only the standard library and starts separate isolated processes
+for Python, Rust, and auto. It verifies package/module origins and core, modern,
+compatibility, snapshot, frozen, exception, recovery, and GC behavior.
+
+For a local check, install the freshly built wheel with `--no-deps`, copy the
+script to an external temporary directory, change to that directory, unset
+`PYTHONPATH`, set `RPLY_CHECKOUT` to the checkout's absolute path, then run the
+fresh environment's Python with `-I verify_wheel.py --all`. Source pytest adds
+`src` to the import path and cannot replace this installed-artifact check.
+
 ## Run the example
 
 After `maturin develop`, run `python examples/calculator.py` (expected: `20`).

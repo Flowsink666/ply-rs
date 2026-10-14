@@ -161,6 +161,93 @@ mod tests {
     }
 
     #[test]
+    fn test_table_preserves_resolved_zero_precedence() {
+        let mut g = Grammar::new(Some(
+            ["A".to_string(), "B".to_string(), "N".to_string()]
+                .into_iter()
+                .collect(),
+        ));
+        g.set_precedence(vec![("left".to_string(), vec!["A".to_string()])])
+            .unwrap();
+        g.add_production(
+            "e",
+            vec![
+                "e".to_string(),
+                "A".to_string(),
+                "B".to_string(),
+                "e".to_string(),
+            ],
+            1,
+            None,
+        )
+        .unwrap();
+        g.add_production("e", vec!["N".to_string()], 2, None)
+            .unwrap();
+        g.set_start(Some("e")).unwrap();
+
+        let table = LRTable::build(&mut g).unwrap();
+        assert_eq!(g.productions[1].precedence, ("right".to_string(), 0));
+        assert!(table
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.token == "A" && conflict.resolution == "shift"));
+    }
+
+    #[test]
+    fn test_table_preserves_explicit_zero_precedence_override() {
+        let mut g = Grammar::new(Some(
+            ["PLUS".to_string(), "N".to_string()].into_iter().collect(),
+        ));
+        g.set_precedence(vec![("left".to_string(), vec!["PLUS".to_string()])])
+            .unwrap();
+        g.add_production_with_prec(
+            "e",
+            vec!["e".to_string(), "PLUS".to_string(), "e".to_string()],
+            1,
+            Some(("right".to_string(), 0)),
+        )
+        .unwrap();
+        g.add_production("e", vec!["N".to_string()], 2, None)
+            .unwrap();
+        g.set_start(Some("e")).unwrap();
+
+        let table = LRTable::build(&mut g).unwrap();
+        assert_eq!(g.productions[1].precedence, ("right".to_string(), 0));
+        assert!(table
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.token == "PLUS" && conflict.resolution == "shift"));
+    }
+
+    #[test]
+    fn test_runtime_table_preserves_nonassoc_prohibition() {
+        let mut g = Grammar::new(Some(
+            ["LT".to_string(), "N".to_string()].into_iter().collect(),
+        ));
+        g.set_precedence(vec![("nonassoc".to_string(), vec!["LT".to_string()])])
+            .unwrap();
+        g.add_production(
+            "e",
+            vec!["e".to_string(), "LT".to_string(), "e".to_string()],
+            1,
+            None,
+        )
+        .unwrap();
+        g.add_production("e", vec!["N".to_string()], 2, None)
+            .unwrap();
+        g.set_start(Some("e")).unwrap();
+
+        let table = LRTable::build(&mut g).unwrap();
+        let forbidden_state = table
+            .action
+            .iter()
+            .find_map(|(state, row)| (row.get("LT") == Some(&None)).then_some(*state))
+            .expect("nonassoc conflict must forbid LT");
+        let runtime = ParserTables::new(table.states.len(), table.action, table.goto);
+        assert_eq!(runtime.action[forbidden_state].get("LT"), Some(&None));
+    }
+
+    #[test]
     fn test_rust_grammar_first_follow() {
         let mut g = Grammar::new(Some(
             ["a".to_string(), "b".to_string()].into_iter().collect(),
@@ -204,7 +291,7 @@ mod tests {
         g.set_start(Some("S")).unwrap();
 
         let table = LRTable::build(&mut g).unwrap();
-        assert!(table.states.len() > 0);
+        assert!(!table.states.is_empty());
         assert_eq!(table.conflicts.len(), 0);
         assert!(table.action.get(&0).unwrap().get("a").is_some());
     }
@@ -244,7 +331,7 @@ mod tests {
         g.set_start(Some("expr")).unwrap();
 
         let table = LRTable::build(&mut g).unwrap();
-        assert!(table.conflicts.len() > 0);
+        assert!(!table.conflicts.is_empty());
         for c in &table.conflicts {
             assert_eq!(c.kind, "shift/reduce");
             assert!(c.resolution == "shift" || c.resolution == "reduce");

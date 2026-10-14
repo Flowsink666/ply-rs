@@ -6,6 +6,15 @@ const MAXINT: usize = usize::MAX;
 
 pub type LRItem = (usize, usize); // (production_number, dot_index)
 
+/// Cached LR(0) transitions from a state and symbol to the target state.
+type StateTransitions = HashMap<(usize, String), usize>;
+
+struct LR0Collection {
+    states: Vec<BTreeSet<LRItem>>,
+    ordered_states: Vec<Vec<LRItem>>,
+    transitions: StateTransitions,
+}
+
 #[derive(Clone, Debug)]
 pub struct ConflictRecord {
     pub kind: String, // "shift/reduce" or "reduce/reduce"
@@ -34,47 +43,68 @@ fn digraph<K: std::hash::Hash + Eq + Clone>(
     let mut stack: Vec<K> = Vec::new();
     let mut f_map: HashMap<K, HashSet<String>> = HashMap::new();
 
-    fn traverse<K: std::hash::Hash + Eq + Clone>(
+    fn enter<K: std::hash::Hash + Eq + Clone>(
         x: &K,
         stack: &mut Vec<K>,
         n_map: &mut HashMap<K, usize>,
         f_map: &mut HashMap<K, HashSet<String>>,
         r_rel: &impl Fn(&K) -> Vec<K>,
         fp_func: &impl Fn(&K) -> HashSet<String>,
-    ) {
+    ) -> (K, usize, std::vec::IntoIter<K>) {
         stack.push(x.clone());
         let d = stack.len();
         n_map.insert(x.clone(), d);
         f_map.insert(x.clone(), fp_func(x));
+        (x.clone(), d, r_rel(x).into_iter())
+    }
 
-        for y in r_rel(x) {
-            if n_map.get(&y).copied().unwrap_or(0) == 0 {
-                traverse(&y, stack, n_map, f_map, r_rel, fp_func);
-            }
-            let ny = n_map.get(&y).copied().unwrap_or(MAXINT);
-            let nx = n_map.get_mut(x).unwrap();
-            *nx = (*nx).min(ny);
-
-            let fy = f_map.get(&y).cloned().unwrap_or_default();
-            f_map.get_mut(x).unwrap().extend(fy);
-        }
-
-        if n_map.get(x).copied() == Some(d) {
-            let fx = f_map.get(x).cloned().unwrap_or_default();
-            loop {
-                let elem = stack.pop().unwrap();
-                n_map.insert(elem.clone(), MAXINT);
-                f_map.insert(elem.clone(), fx.clone());
-                if &elem == x {
-                    break;
-                }
-            }
-        }
+    fn propagate<K: std::hash::Hash + Eq + Clone>(
+        x: &K,
+        y: &K,
+        n_map: &mut HashMap<K, usize>,
+        f_map: &mut HashMap<K, HashSet<String>>,
+    ) {
+        let ny = n_map[y];
+        let nx = n_map.get_mut(x).unwrap();
+        *nx = (*nx).min(ny);
+        let fy = f_map[y].clone();
+        f_map.get_mut(x).unwrap().extend(fy);
     }
 
     for x in x_nodes {
-        if n_map.get(x).copied().unwrap_or(0) == 0 {
-            traverse(x, &mut stack, &mut n_map, &mut f_map, &r_rel, &fp_func);
+        if n_map.get(x).copied().unwrap_or(0) != 0 {
+            continue;
+        }
+        let mut frames = vec![enter(
+            x, &mut stack, &mut n_map, &mut f_map, &r_rel, &fp_func,
+        )];
+        // Resume each parent's edge iteration only after the child finishes.
+        while !frames.is_empty() {
+            if let Some(child) = frames.last_mut().unwrap().2.next() {
+                if n_map.get(&child).copied().unwrap_or(0) == 0 {
+                    frames.push(enter(
+                        &child, &mut stack, &mut n_map, &mut f_map, &r_rel, &fp_func,
+                    ));
+                } else {
+                    propagate(&frames.last().unwrap().0, &child, &mut n_map, &mut f_map);
+                }
+            } else {
+                let (node, depth, _) = frames.pop().unwrap();
+                if n_map[&node] == depth {
+                    let fx = f_map[&node].clone();
+                    loop {
+                        let elem = stack.pop().unwrap();
+                        n_map.insert(elem.clone(), MAXINT);
+                        f_map.insert(elem.clone(), fx.clone());
+                        if elem == node {
+                            break;
+                        }
+                    }
+                }
+                if let Some((parent, _, _)) = frames.last() {
+                    propagate(parent, &node, &mut n_map, &mut f_map);
+                }
+            }
         }
     }
 
@@ -83,23 +113,17 @@ fn digraph<K: std::hash::Hash + Eq + Clone>(
 
 impl LRTable {
     pub fn build(grammar: &mut Grammar) -> Result<Self, String> {
-        // Re-evaluate production precedences if any rightmost terminal now has precedence
-        for p in grammar.productions.iter_mut() {
-            if p.precedence == ("right".to_string(), 0) {
-                for s in p.prod.iter().rev() {
-                    if let Some(prec) = grammar.precedence.get(s) {
-                        p.precedence = prec.clone();
-                        break;
-                    }
-                }
-            }
-        }
-
+        // Production precedence is resolved when the rule is registered;
+        // ("right", 0) is a complete result and must survive compilation.
         grammar.compute_first();
         grammar.compute_follow();
 
-        let (states, state_map) = Self::lr0_items(grammar);
-        let lookaheads = Self::compute_lalr_lookaheads(grammar, &states, &state_map);
+        let LR0Collection {
+            states,
+            ordered_states,
+            transitions,
+        } = Self::lr0_items(grammar);
+        let lookaheads = Self::compute_lalr_lookaheads(grammar, &states, &transitions);
 
         let mut action: HashMap<usize, HashMap<String, Option<i32>>> = HashMap::new();
         let mut goto: HashMap<usize, HashMap<String, usize>> = HashMap::new();
@@ -107,7 +131,9 @@ impl LRTable {
         let mut rr_conflicts = Vec::new();
         let mut conflicts = Vec::new();
 
-        for (st, items) in states.iter().enumerate() {
+        // Canonical sets identify states; closure order determines the sequence
+        // of reference conflict decisions when a token has several candidates.
+        for (st, items) in ordered_states.iter().enumerate() {
             let mut st_action: HashMap<String, Option<i32>> = HashMap::new();
             let mut st_action_rule: HashMap<String, usize> = HashMap::new();
             let mut st_goto: HashMap<String, usize> = HashMap::new();
@@ -145,7 +171,7 @@ impl LRTable {
                 } else {
                     // Shift or GOTO
                     let sym = &prod.prod[lr_index];
-                    let next_state = state_map.get(&Self::lr0_goto(items, sym, grammar)).copied();
+                    let next_state = transitions.get(&(st, sym.clone())).copied();
 
                     if let Some(j) = next_state {
                         if grammar.terminals.contains(sym) {
@@ -189,34 +215,30 @@ impl LRTable {
         })
     }
 
-    fn lr0_closure(items: &[LRItem], grammar: &Grammar) -> BTreeSet<LRItem> {
-        let mut set: BTreeSet<LRItem> = items.iter().copied().collect();
+    fn lr0_closure(items: &[LRItem], grammar: &Grammar) -> Vec<LRItem> {
+        let mut queue: Vec<LRItem> = items.to_vec();
         let mut added: HashSet<usize> = HashSet::new();
+        let mut q_idx = 0;
 
-        let mut changed = true;
-        while changed {
-            changed = false;
-            let current_items: Vec<LRItem> = set.iter().copied().collect();
-            for (pnum, idx) in current_items {
-                let prod = &grammar.productions[pnum];
-                if idx < prod.len() {
-                    let sym = &prod.prod[idx];
-                    if let Some(pnums) = grammar.prodnames.get(sym) {
-                        for &pn in pnums {
-                            if !added.contains(&pn) {
-                                added.insert(pn);
-                                set.insert((pn, 0));
-                                changed = true;
-                            }
+        while q_idx < queue.len() {
+            let (pnum, idx) = queue[q_idx];
+            q_idx += 1;
+            let prod = &grammar.productions[pnum];
+            if idx < prod.len() {
+                let sym = &prod.prod[idx];
+                if let Some(pnums) = grammar.prodnames.get(sym) {
+                    for &pn in pnums {
+                        if added.insert(pn) {
+                            queue.push((pn, 0));
                         }
                     }
                 }
             }
         }
-        set
+        queue
     }
 
-    fn lr0_goto(items: &BTreeSet<LRItem>, sym: &str, grammar: &Grammar) -> BTreeSet<LRItem> {
+    fn lr0_goto(items: &[LRItem], sym: &str, grammar: &Grammar) -> Vec<LRItem> {
         let mut next_items = Vec::new();
         for &(pnum, idx) in items {
             let prod = &grammar.productions[pnum];
@@ -227,18 +249,20 @@ impl LRTable {
         Self::lr0_closure(&next_items, grammar)
     }
 
-    fn lr0_items(grammar: &Grammar) -> (Vec<BTreeSet<LRItem>>, HashMap<BTreeSet<LRItem>, usize>) {
+    fn lr0_items(grammar: &Grammar) -> LR0Collection {
         let start_item = (0, 0);
         let i0 = Self::lr0_closure(&[start_item], grammar);
+        let initial_key: BTreeSet<LRItem> = i0.iter().copied().collect();
 
-        let mut states = vec![i0.clone()];
+        let mut states = vec![initial_key.clone()];
+        let mut ordered_states = vec![i0];
         let mut state_map = HashMap::new();
-        state_map.insert(i0, 0);
+        state_map.insert(initial_key, 0);
+        let mut transitions = HashMap::new();
 
         let mut i = 0;
         while i < states.len() {
-            let current_state = states[i].clone();
-            i += 1;
+            let current_state = ordered_states[i].clone();
 
             let mut symbols = HashSet::new();
             for &(pnum, idx) in &current_state {
@@ -250,14 +274,29 @@ impl LRTable {
 
             for sym in symbols {
                 let g = Self::lr0_goto(&current_state, &sym, grammar);
-                if !g.is_empty() && !state_map.contains_key(&g) {
-                    state_map.insert(g.clone(), states.len());
-                    states.push(g);
+                if !g.is_empty() {
+                    let key: BTreeSet<LRItem> = g.iter().copied().collect();
+                    let next_state = match state_map.get(&key) {
+                        Some(&existing) => existing,
+                        None => {
+                            let new_id = states.len();
+                            state_map.insert(key.clone(), new_id);
+                            states.push(key);
+                            ordered_states.push(g);
+                            new_id
+                        }
+                    };
+                    transitions.insert((i, sym), next_state);
                 }
             }
+            i += 1;
         }
 
-        (states, state_map)
+        LR0Collection {
+            states,
+            ordered_states,
+            transitions,
+        }
     }
 
     fn compute_nullable(grammar: &Grammar) -> HashSet<String> {
@@ -280,7 +319,7 @@ impl LRTable {
     fn compute_lalr_lookaheads(
         grammar: &Grammar,
         states: &[BTreeSet<LRItem>],
-        state_map: &HashMap<BTreeSet<LRItem>, usize>,
+        trans_map: &StateTransitions,
     ) -> HashMap<(usize, usize), HashSet<String>> {
         let nullable = Self::compute_nullable(grammar);
 
@@ -303,11 +342,12 @@ impl LRTable {
         let dr_relation = |trans: &(usize, String)| -> HashSet<String> {
             let (st, ref n) = *trans;
             let mut terms = HashSet::new();
-            let g = Self::lr0_goto(&states[st], n, grammar);
-            for &(pnum, idx) in &g {
-                let prod = &grammar.productions[pnum];
-                if idx < prod.len() && grammar.terminals.contains(&prod.prod[idx]) {
-                    terms.insert(prod.prod[idx].clone());
+            if let Some(&j) = trans_map.get(&(st, n.clone())) {
+                for &(pnum, idx) in &states[j] {
+                    let prod = &grammar.productions[pnum];
+                    if idx < prod.len() && grammar.terminals.contains(&prod.prod[idx]) {
+                        terms.insert(prod.prod[idx].clone());
+                    }
                 }
             }
             if st == 0 && n == &grammar.productions[0].prod[0] {
@@ -320,9 +360,8 @@ impl LRTable {
         let reads_relation = |trans: &(usize, String)| -> Vec<(usize, String)> {
             let (st, ref n) = *trans;
             let mut rel = Vec::new();
-            let g = Self::lr0_goto(&states[st], n, grammar);
-            if let Some(&j) = state_map.get(&g) {
-                for &(pnum, idx) in &g {
+            if let Some(&j) = trans_map.get(&(st, n.clone())) {
+                for &(pnum, idx) in &states[j] {
                     let prod = &grammar.productions[pnum];
                     if idx < prod.len() && nullable.contains(&prod.prod[idx]) {
                         rel.push((j, prod.prod[idx].clone()));
@@ -361,8 +400,7 @@ impl LRTable {
                         }
                     }
 
-                    let g = Self::lr0_goto(&states[j], t, grammar);
-                    match state_map.get(&g) {
+                    match trans_map.get(&(j, t.clone())) {
                         Some(&next_j) => j = next_j,
                         None => break,
                     }
@@ -507,5 +545,157 @@ impl LRTable {
                 ),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod digraph_tests {
+    use super::digraph;
+    use std::collections::{HashMap, HashSet};
+
+    fn fixed_point(edges: &[Vec<usize>]) -> HashMap<usize, HashSet<String>> {
+        let mut labels: HashMap<_, HashSet<_>> = (0..edges.len())
+            .map(|node| (node, [format!("label{node}")].into_iter().collect()))
+            .collect();
+        loop {
+            let mut changed = false;
+            for (node, children) in edges.iter().enumerate() {
+                let mut reachable = labels[&node].clone();
+                for child in children {
+                    reachable.extend(labels[child].iter().cloned());
+                }
+                if reachable != labels[&node] {
+                    labels.insert(node, reachable);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return labels;
+            }
+        }
+    }
+
+    #[test]
+    fn matches_fixed_point_on_every_three_node_graph() {
+        for mask in 0..(1 << 9) {
+            let edges: Vec<Vec<_>> = (0..3)
+                .map(|node| {
+                    (0..3)
+                        .filter(|child| mask & (1 << (node * 3 + child)) != 0)
+                        .collect()
+                })
+                .collect();
+            let actual = digraph(
+                &[0, 1, 2],
+                |node| edges[*node].clone(),
+                |node| [format!("label{node}")].into_iter().collect(),
+            );
+            assert_eq!(actual, fixed_point(&edges), "edge mask {mask}");
+        }
+    }
+
+    #[test]
+    fn diamond_and_disconnected_components_include_successors_outside_roots() {
+        let edges = vec![vec![1, 2], vec![3], vec![3], vec![], vec![5], vec![]];
+        let actual = digraph(
+            &[0, 4],
+            |node| edges[*node].clone(),
+            |node| [format!("label{node}")].into_iter().collect(),
+        );
+        assert_eq!(actual, fixed_point(&edges));
+    }
+
+    #[test]
+    fn deep_chain_does_not_use_the_call_stack() {
+        let width = 10000;
+        let actual = digraph(
+            &[0],
+            |node| {
+                if *node < width - 1 {
+                    vec![node + 1]
+                } else {
+                    vec![]
+                }
+            },
+            |node| {
+                if *node == width - 1 {
+                    ["end".to_owned()].into_iter().collect()
+                } else {
+                    HashSet::new()
+                }
+            },
+        );
+        assert_eq!(actual.len(), width);
+        for labels in actual.values() {
+            assert_eq!(labels, &HashSet::from(["end".to_owned()]));
+        }
+    }
+}
+
+#[cfg(test)]
+mod conflict_order_tests {
+    use super::LRTable;
+    use crate::grammar::Grammar;
+    use std::collections::HashSet;
+
+    #[test]
+    fn recursive_kernel_keeps_the_reference_closure_list() {
+        let mut grammar = Grammar::new(Some(HashSet::from(["a".to_owned()])));
+        grammar
+            .add_production("s", vec!["s".to_owned(), "a".to_owned()], 1, None)
+            .unwrap();
+        grammar.add_production("s", vec![], 2, None).unwrap();
+        grammar.set_start(Some("s")).unwrap();
+
+        // Python's expansion tracker begins empty, so a recursive production
+        // already present in a caller's kernel is appended once during closure.
+        // State identity still removes this duplicate through its canonical key.
+        let ordered = LRTable::lr0_closure(&[(1, 0)], &grammar);
+        assert_eq!(ordered, [(1, 0), (1, 0), (2, 0)]);
+    }
+
+    #[test]
+    fn two_reductions_and_shift_follow_reference_closure_order() {
+        let terminals = ["a", "b", "HIGH"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        let mut grammar = Grammar::new(Some(terminals));
+        grammar
+            .set_precedence(vec![
+                ("left".to_owned(), vec!["a".to_owned()]),
+                ("right".to_owned(), vec!["HIGH".to_owned()]),
+            ])
+            .unwrap();
+        grammar.add_production("A", vec![], 1, None).unwrap();
+        grammar
+            .add_production("B", vec![], 2, Some("HIGH"))
+            .unwrap();
+        for (line, rhs) in [
+            (3, vec!["A", "a"]),
+            (4, vec!["B", "a"]),
+            (5, vec!["a", "b"]),
+        ] {
+            grammar
+                .add_production(
+                    "s",
+                    rhs.into_iter().map(str::to_owned).collect(),
+                    line,
+                    None,
+                )
+                .unwrap();
+        }
+        grammar.set_start(Some("s")).unwrap();
+
+        let table = LRTable::build(&mut grammar).unwrap();
+        assert_eq!(table.action[&0]["a"], Some(-2));
+        let decisions: Vec<_> = table
+            .sr_conflicts
+            .iter()
+            .filter(|(state, token, _)| *state == 0 && token == "a")
+            .map(|(_, _, resolution)| resolution.as_str())
+            .collect();
+        assert_eq!(decisions, ["shift", "reduce"]);
+        assert!(table.rr_conflicts.is_empty());
     }
 }

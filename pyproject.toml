@@ -40,6 +40,7 @@ include = [
     { path = "examples/**/*", format = "sdist" },
     { path = "docs/**/*", format = "sdist" },
     { path = "upstream/README.md", format = "sdist" },
+    { path = ".github/scripts/verify_wheel.py", format = "sdist" },
 ]
 exclude = ["**/__pycache__/**", "**/*.pyc", "upstream/ply/**", "upstream/sly/**"]
 
@@ -47,3 +48,4 @@ exclude = ["**/__pycache__/**", "**/*.pyc", "upstream/ply/**", "upstream/sly/**"
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = ["differential: compares compatibility APIs against optional upstream clones"]
+addopts = "--strict-markers"

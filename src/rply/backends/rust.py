@@ -2,7 +2,7 @@
 
 from typing import Dict, List, Tuple
 from rply.core.conflicts import ConflictRecord
-from rply.core.table_data import ParseTableData, TableBuildResult
+from rply.core.table_data import ParseTableData, TableBuildResult, native_rows
 
 
 class RustTableArtifact:
@@ -18,7 +18,7 @@ class RustTableArtifact:
         if (data.num_states == self.native_table.num_states
                 and data.action == self.action_snapshot and data.goto == self.goto_snapshot):
             return self.module.LRParserEngine.from_table(self.native_table, *metadata)
-        return self.module.LRParserEngine(data.num_states, data.action, data.goto, *metadata)
+        return self.module.LRParserEngine(data.num_states, native_rows(data.action), native_rows(data.goto), *metadata)
 
 
 def build_table(grammar, module) -> TableBuildResult:
@@ -30,12 +30,16 @@ def build_table(grammar, module) -> TableBuildResult:
             if lvl not in level_map:
                 level_map[lvl] = (assoc, [])
             level_map[lvl][1].append(tok)
-        prec_specs = [level_map[lvl] for lvl in sorted(level_map.keys())]
+        # Empty tiers preserve numeric levels after repeated declarations or
+        # intentionally empty entries; compacting them changes shift priority.
+        prec_specs = [level_map.get(lvl, ("right", []))
+                      for lvl in range(1, max(level_map) + 1)]
         rs_g.set_precedence(prec_specs)
 
     for p in grammar.Productions[1:]:  # skip augmented rule S' -> start
-        prec_val = p.prec if p.prec != ("right", 0) else None
-        rs_g.add_production(p.name, list(p.prod), p.line, None, prec_val)
+        # Grammar registration has already resolved precedence. Level zero is
+        # a valid result, not a request for the native backend to infer it.
+        rs_g.add_production(p.name, list(p.prod), p.line, None, p.prec)
 
     rs_g.set_start(grammar.start)
     rs_table = rs_g.build_table()

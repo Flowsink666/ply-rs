@@ -188,3 +188,118 @@ native lexer tokens; external Python token classes still use attribute
 adaptation. Python token creation, iteration, and proxy-style callbacks remain.
 Sequential timings are subject to background load and do not isolate each
 optimization.
+
+## Python scanner and parser pass, 2026-10-14
+
+Windows 11, Intel Core i7-11800H, CPython 3.14.7. The comparison loads saved
+pre-edit Python engines and current engines in separate processes, in the order
+before/after/after/before. Each group uses three warm-ups and five repeats of ten
+operations with GC enabled. The table pools the ten per-repeat samples for each
+version and shows median end-to-end milliseconds per operation.
+
+| Workload | Before | After | Before/after ratio |
+| --- | ---: | ---: | ---: |
+| `arithmetic` | 41.833 | 38.729 | 1.08x |
+| `nested` | 5.776 | 5.143 | 1.12x |
+| `json` | 48.522 | 39.716 | 1.22x |
+| `json-unicode` | 47.857 | 40.514 | 1.18x |
+| `mini-language` | 25.426 | 22.768 | 1.12x |
+| `wide-grammar` | 83.201 | 33.403 | 2.49x |
+
+Equal-weight geometric mean ratios across the six workloads are 1.63x for
+scanning, 1.07x for parsing, and 1.30x end-to-end. The wide-grammar scanner goes
+from 78.513 to 23.471 ms (3.35x). These are warm-process observations; smaller
+differences remain subject to CPU frequency, temperature, and background load.
+
+The Python scanner now combines consecutive capture-free rules with identical
+effective regex flags, retaining stable priority order. Captures/backreferences,
+conditional groups, global inline flags, and DEBUG patterns remain standalone.
+Combined expressions are prepared lazily per state and invalidated by rule
+registration. First scanning pays that preparation cost; the suite's `build`
+operation constructs the lexer but does not yet scan input.
+
+The parser binds tables per invocation, uses direct indexing for ordinary
+ACTION/GOTO dictionaries, and keeps missing/forbidden actions and custom mapping
+semantics intact. Proxy reductions use one fresh LHS/RHS list. Saved proxies and
+consumed-token snapshots retain their original lifetime/value behavior.
+
+Short cProfile checks show 432,020 to 7,000 regex `match` calls for the
+7,000-token wide workload, and 60,000 to 19,000 dictionary `get` calls for
+arithmetic parsing. Indexing still performs table lookups; profiler timings are
+not used for speed ratios. A separate four-engine run confirms that Python
+remains slower than PLY on these workloads after this pass.
+
+Final validation: Python strict 499 passed with ten declared native-only skips;
+Rust strict 509 passed; isolated release-wheel checks passed for Python, Rust,
+and auto. Python 3.9 additionally passes the inline-flags warning contract and
+the six-workload, four-engine correctness check.
+
+Local reports and raw samples are in
+`target/benchmarks/ply-optimization-2026-10-14.md`,
+`ply-optimization-paired-2026-10-14.json`, and
+`ply-optimization-matrix-2026-10-14.json`. Saved pre-edit sources and the
+comparison script are in the same ignored benchmark directory.
+
+Follow-up semantic checks keep ambiguous nested-set/set-operation expressions
+standalone, preserving the warning policy applied during original registration.
+The prepared-slice parser path now checks the original bound method's identity;
+instrumented reduction hooks retain four arguments and RHS-only symbols.
+Normal-path cProfile call counts remain 7,000 regex matches for the wide workload
+and 19,000 dictionary `get` calls for arithmetic parsing. This follow-up checked
+call counts, not a new before/after timing ratio. Details and regression evidence
+are in `target/semantics-audit-2026-10-14.md`.
+
+The next scanning pass caches the current state's matchers and ignored characters
+for ordinary strings. State setters invalidate the cache; a separate shared scan
+revision observes ignore edits without recompiling expressions. String subclasses
+retain uncached lookup and release behavior. Matcher entries record group dispatch
+at preparation time, avoiding a length check per match. Token snapshots, saved
+proxies, custom constructors, and lookahead validation retain their prior behavior.
+
+This smaller change is measured with same-process ABBA pairs for each workload,
+with token values, positions, lines, and parse results checked before timing.
+Each trial has eight samples per version and operation, ten iterations per sample,
+three warmups, and GC enabled. Pure parsing is unchanged and serves as a noise
+control. The initial cache candidate had negligible benefit and was simplified;
+the separately tested guarded symbol-construction candidate was slower and was
+not adopted. Raw trials, source snapshots, and scripts are under
+`target/benchmarks/scan-cache-*`; details are in
+`target/benchmarks/scan-cache-2026-10-14.md`.
+
+Pooling the two final trials gives equal-weight geometric mean ratios of 1.026x
+for scanning and 1.023x end-to-end. The unchanged parser measures 0.991x, showing
+that small timing movements still include noise. These are modest observations,
+not a guarantee for every workload. The wide scanner retains 7,000 regex matches
+while dictionary `get` calls fall from 14,000 to two and matcher-dispatch `len`
+calls fall from 7,000 to zero. Final strict checks: Python 517 passed plus ten
+declared skips; Rust 527 passed. Isolated release-wheel checks pass 19 contract
+groups under each of Python, Rust, and auto.
+
+The Rust follow-up prepares a fresh proxy slice in native code for the original
+shared reducer, removes a redundant LHS clone before that callback, and uses
+direct calls for value actions with zero to three arguments. Custom reduction
+hooks and older extensions retain the original protocol; snapshots and saved
+proxy objects remain independent. Public proxy/values and dynamic/frozen mode
+choices are unchanged. The native RHS list and original default value remain
+alive through the same callback/traceback release points, even after slice edits.
+
+Native before/after libraries and their respective adapters are loaded separately
+in the same interpreter for ABBA measurements. Each runtime's tokens come from
+its own native lexer, and their types are checked to avoid accidentally measuring
+generic attribute conversion on only one side. Table construction is common and
+outside timing. Six default proxy workloads plus arithmetic/JSON value actions
+in dynamic/frozen mode have independent output and token-position checks. Reports,
+raw samples, saved source/binaries, and the comparison script are under
+`target/benchmarks/rust-reduction-*`; the summary is
+`target/benchmarks/rust-reduction-2026-10-14.md`.
+
+Two final trials pool 16 samples per version/operation, reconstructing runtimes
+per ABBA block to average native HashMap layout differences. Equal-weight ratios
+for the six default proxy workloads are 1.033x for parsing and 1.036x end-to-end.
+Arithmetic/JSON value actions measure 1.078x/1.048x in dynamic mode and
+1.049x/1.061x when frozen. Modes are compared separately and are not switched by
+the benchmark or implementation. CPU frequency and external load remain variable.
+The initial experimental single-list candidate changed finalizer/slice release
+timing and is excluded from final measurements. Final checks: Python 565 passed
+plus ten declared skips, Rust 575 passed, Cargo 12 passed, strict Clippy/rustfmt
+passed, and isolated Python/Rust/auto wheel verification passes 22 groups each.

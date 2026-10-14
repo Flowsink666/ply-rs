@@ -112,12 +112,21 @@ class Parser(metaclass=ParserMeta):
     def table(self) -> LRTable:
         return self._table
 
+    @property
+    def frozen(self) -> bool:
+        return self._engine.frozen
+
+    def freeze(self):
+        """Use a read-only grammar snapshot for subsequent parses."""
+        self._engine.freeze()
+        return self
+
     def parse(
         self,
         token_stream: Union[Iterator[Any], Sequence[Any]],
         lexer: Any = None,
     ) -> Any:
-        return self._engine.parse(token_stream, lexer=lexer)
+        return self._engine.parse(token_stream, lexer=lexer, parser=self)
 
 
 ModernParser = Parser

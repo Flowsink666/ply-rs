@@ -26,32 +26,54 @@ def digraph(
     N: Dict[Any, int] = {x: 0 for x in X}
     stack: List[Any] = []
     F: Dict[Any, List[str]] = {}
+    F_set: Dict[Any, Set[str]] = {}
+    frames: List[Tuple[Any, int, Any]] = []
 
-    def traverse(x: Any) -> None:
+    def enter(x: Any) -> None:
         stack.append(x)
         d = len(stack)
         N[x] = d
-        F[x] = list(FP(x))
+        initial = list(FP(x))
+        F[x] = initial
+        F_set[x] = set(initial)
+        frames.append((x, d, iter(R(x))))
 
-        for y in R(x):
-            if N.get(y, 0) == 0:
-                traverse(y)
-            N[x] = min(N[x], N[y])
-            for a in F.get(y, []):
-                if a not in F[x]:
-                    F[x].append(a)
-
-        if N[x] == d:
-            while True:
-                elem = stack.pop()
-                N[elem] = MAXINT
-                F[elem] = F[x]
-                if elem == x:
-                    break
+    def propagate(x: Any, y: Any) -> None:
+        N[x] = min(N[x], N[y])
+        fx = F[x]
+        fx_set = F_set[x]
+        for a in F[y]:
+            if a not in fx_set:
+                fx_set.add(a)
+                fx.append(a)
 
     for x in X:
-        if N[x] == 0:
-            traverse(x)
+        if N[x] != 0:
+            continue
+        enter(x)
+        # Keep suspended edge iterators separate from the component stack.
+        # A child's labels propagate only after its traversal has completed.
+        while frames:
+            node, depth, successors = frames[-1]
+            try:
+                child = next(successors)
+            except StopIteration:
+                if N[node] == depth:
+                    while True:
+                        elem = stack.pop()
+                        N[elem] = MAXINT
+                        F[elem] = F[node]
+                        F_set[elem] = F_set[node]
+                        if elem == node:
+                            break
+                frames.pop()
+                if frames:
+                    propagate(frames[-1][0], node)
+            else:
+                if N.get(child, 0) == 0:
+                    enter(child)
+                else:
+                    propagate(node, child)
 
     return F
 
@@ -73,8 +95,9 @@ class PythonLRTable:
         self.rr_conflicts: List[Tuple[int, Production, Production]] = []
 
         # Internal caches for LR0 states
-        self._goto_cache: Dict[Tuple[frozenset, str], List[LRItem]] = {}
         self._state_map: Dict[frozenset, int] = {}
+        self._transitions: Dict[Tuple[int, str], int] = {}
+        self._transition_items: Dict[Tuple[int, str], List[LRItem]] = {}
         self.states: List[List[LRItem]] = []
 
         # Build table
@@ -117,26 +140,14 @@ class PythonLRTable:
         return J
 
     def _lr0_goto(self, I: List[LRItem], x: str) -> List[LRItem]:
-        """Compute LR(0) goto(I, x)."""
-        ik = self._state_key(I)
-        cache_key = (ik, x)
-        cached = self._goto_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
+        """Compute one transition while discovering the LR(0) states."""
         gs: List[LRItem] = []
         for p in I:
             n = p.lr_next
             if n is not None and n.lr_before == x:
                 gs.append(n)
 
-        if gs:
-            res = self._lr0_closure(gs)
-        else:
-            res = []
-
-        self._goto_cache[cache_key] = res
-        return res
+        return self._lr0_closure(gs) if gs else []
 
     def _lr0_items(self) -> List[List[LRItem]]:
         """Construct collection C of LR(0) item sets."""
@@ -144,10 +155,13 @@ class PythonLRTable:
         I0 = self._lr0_closure([start_item])
         C = [I0]
         self._state_map = {self._state_key(I0): 0}
+        self._transitions = {}
+        self._transition_items = {}
 
         i = 0
         while i < len(C):
             I = C[i]
+            source = i
             i += 1
 
             # Unique symbols after dot
@@ -164,6 +178,12 @@ class PythonLRTable:
                 if gk not in self._state_map:
                     self._state_map[gk] = len(C)
                     C.append(g)
+                self._transitions[source, x] = self._state_map[gk]
+                if x in self.grammar.Nonterminals:
+                    # Equivalent target states can have different item orders
+                    # along incoming edges. READS/DR expose that order through
+                    # the public lookahead lists, so retain each edge's view.
+                    self._transition_items[source, x] = g
 
         return C
 
@@ -206,7 +226,7 @@ class PythonLRTable:
         """Direct read relation DR(p, A)."""
         state, N = trans
         terms: List[str] = []
-        g = self._lr0_goto(C[state], N)
+        g = self._transition_items[state, N]
         for item in g:
             if item.lr_index < item.len:
                 a = item.prod[item.lr_index]
@@ -228,8 +248,8 @@ class PythonLRTable:
         """Compute READS relation: (p, A) READS (j, C)."""
         rel: List[Tuple[int, str]] = []
         state, N = trans
-        g = self._lr0_goto(C[state], N)
-        j = self._state_map.get(self._state_key(g), -1)
+        j = self._transitions[state, N]
+        g = self._transition_items[state, N]
         for item in g:
             if item.lr_index < item.len:
                 a = item.prod[item.lr_index]
@@ -265,8 +285,7 @@ class PythonLRTable:
                         if all(s in nullable for s in rest):
                             includedict.setdefault((j, t), []).append((state, N))
 
-                    g = self._lr0_goto(C[j], t)
-                    j = self._state_map.get(self._state_key(g), -1)
+                    j = self._transitions[j, t]
                     curr_item = curr_item.lr_next  # type: ignore
 
                 # Locate the reduction item in state j
@@ -301,14 +320,22 @@ class PythonLRTable:
         )
 
         # Attach lookaheads to productions
+        lookahead_memberships: Dict[Tuple[int, int], Set[str]] = {}
         for t, lb in lookbacks.items():
             f = follow_sets.get(t, [])
             for state, item in lb:
-                if state not in item.production.lookaheads:
-                    item.production.lookaheads[state] = []
+                lookaheads = item.production.lookaheads.setdefault(state, [])
+                key = (item.production.number, state)
+                seen = lookahead_memberships.get(key)
+                if seen is None:
+                    # Keep the public list and its order, including lookaheads
+                    # left by an earlier build of this grammar.
+                    seen = set(lookaheads)
+                    lookahead_memberships[key] = seen
                 for a in f:
-                    if a not in item.production.lookaheads[state]:
-                        item.production.lookaheads[state].append(a)
+                    if a not in seen:
+                        seen.add(a)
+                        lookaheads.append(a)
 
     def _build_parse_table(self, C: List[List[LRItem]]) -> None:
         """Build LR action and goto tables with conflict resolution."""
@@ -339,8 +366,7 @@ class PythonLRTable:
                 else:
                     # Shifts & Gotos
                     sym = item.prod[item.lr_index]
-                    g = self._lr0_goto(I, sym)
-                    j = self._state_map.get(self._state_key(g), -1)
+                    j = self._transitions.get((st, sym), -1)
                     if j >= 0:
                         if sym in self.grammar.Terminals:
                             existing = st_action.get(sym)

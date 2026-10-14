@@ -60,6 +60,8 @@ class LexerConfig:
         self.error_funcs: Dict[str, Optional[Callable]] = {"INITIAL": None}
         self.literals: Set[str] = set()
         self.revision = 0
+        # Scanning also depends on ignored characters, independently of REs.
+        self.scan_revision = 0
 
     def prepare(self, method, *args):
         """Validate and compile a definition without changing shared state."""
@@ -99,6 +101,7 @@ class LexerConfig:
         self.ignore.setdefault(name, "")
         self.error_funcs.setdefault(name, None)
         self.revision += 1
+        self.scan_revision += 1
 
     def apply(self, change):
         """Commit a prepared definition after backend setup succeeds."""
@@ -117,8 +120,10 @@ class LexerConfig:
             self.rules[state].append(change.rule)
             self.rules[state].sort(key=lambda rule: rule.priority, reverse=True)
             self.revision += 1
+            self.scan_revision += 1
         elif method == "set_ignore":
             self.ignore[state] = args[1]
+            self.scan_revision += 1
         elif method == "set_error_func":
             self.error_funcs[state] = args[1]
 

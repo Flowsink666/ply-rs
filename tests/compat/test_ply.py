@@ -218,3 +218,31 @@ def test_ply_clone_preserves_states_defined_by_an_iterator():
     lexer.begin("extra")
     assert lexer.clone().token().value == "12"
     assert lexer.token().value == "12"
+
+
+def test_ply_multi_underscore_and_state_rules():
+    def t_string_content(tok):
+        r"[^\"]+"
+        tok.type = "STR"
+        return tok
+
+    def t_begin_string(tok):
+        r"\""
+        tok.lexer.begin("string")
+
+    def t_string_end(tok):
+        r"\""
+        tok.lexer.begin("INITIAL")
+
+    lexer = lex.lex(module={
+        "tokens": ("STR", "NUM"),
+        "states": (("string", "exclusive"),),
+        "t_NUM": r"\d+",
+        "t_ignore": " ",
+        "t_begin_string": t_begin_string,
+        "t_string_content": t_string_content,
+        "t_string_end": t_string_end,
+    })
+    lexer.input('123 "hello" 456')
+    toks = [(t.type, t.value) for t in lexer]
+    assert toks == [("NUM", "123"), ("STR", "hello"), ("NUM", "456")]

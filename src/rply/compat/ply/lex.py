@@ -8,6 +8,9 @@ import sys
 import types
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from rply.core.lexer_engine import LexerEngine, Token as CoreToken, LexError
+from rply.compat._tokens import (
+    _DeferredTokenValue, _TokenValueStorage, _public_token_state, _value_property,
+)
 from rply.compat.ply._definitions import definition_namespace
 
 
@@ -38,10 +41,12 @@ class _RuleCallback:
         return self.function(tok)
 
 
-class LexToken:
+class LexToken(_TokenValueStorage):
     """Representation of a PLY LexToken."""
 
-    __slots__ = ("type", "value", "lineno", "lexpos", "lexer")
+    __slots__ = ("type", "lineno", "lexpos", "lexer")
+
+    value = _value_property
 
     def __init__(self):
         self.type: str = ""
@@ -55,6 +60,9 @@ class LexToken:
 
     def __repr__(self) -> str:
         return str(self)
+
+    def __getstate__(self):
+        return _public_token_state(self, ("type", "value", "lineno", "lexpos", "lexer"))
 
 
 class Lexer:
@@ -91,8 +99,6 @@ class Lexer:
 
     def input(self, s: str) -> None:
         self._engine.input(s)
-        self.lineno = self._engine.lineno
-        self.lexpos = self._engine.pos
 
     def begin(self, state: str) -> None:
         self._engine.begin(state)
@@ -108,19 +114,20 @@ class Lexer:
 
     def skip(self, n: int = 1) -> None:
         self._engine.skip(n)
-        self.lexpos = self._engine.pos
 
     def token(self) -> Optional[LexToken]:
         core_tok = self._engine.token()
-        self.lineno = self._engine.lineno
-        self.lexpos = self._engine.pos
         if core_tok is None:
             return None
 
         # Convert CoreToken to LexToken
         tok = LexToken()
         tok.type = core_tok.type
-        tok.value = core_tok.value
+        # Error handlers may return the compatibility token itself. Copy its
+        # storage without forcing an unread suffix during outward conversion.
+        tok._TokenValueStorage__value = (
+            core_tok._TokenValueStorage__value if type(core_tok) is LexToken else core_tok.value
+        )
         tok.lineno = core_tok.lineno
         tok.lexpos = core_tok.lexpos
         tok.lexer = self
@@ -197,31 +204,35 @@ def lex(
     func_rules: List[Tuple[str, str, Callable[..., Any], int]] = []
     str_rules: List[Tuple[str, str, str]] = []
 
+    state_names = {"INITIAL": "inclusive"}
+    for sspec in states:
+        state_names[sspec[0]] = sspec[1]
+
+    def _statetoken(s: str) -> Tuple[Tuple[str, ...], str]:
+        parts = s.split("_")
+        i = 1
+        for i, part in enumerate(parts[1:], 1):
+            if part not in state_names and part != "ANY":
+                break
+        if i > 1:
+            st = tuple(parts[1:i])
+        else:
+            st = ("INITIAL",)
+        if "ANY" in st:
+            st = tuple(state_names.keys())
+        tok_name = "_".join(parts[i:])
+        return st, tok_name
+
     for name, val in mod_dict.items():
         if not name.startswith("t_"):
             continue
 
-        parts = name.split("_")
-        # Cases:
-        # t_TOKEN -> INITIAL state
-        # t_STATE_TOKEN -> STATE
-        # t_ignore -> ignore in INITIAL
-        # t_STATE_ignore -> ignore in STATE
-        # t_error -> error in INITIAL
-        # t_STATE_error -> error in STATE
-
-        if len(parts) == 2:
-            state = "INITIAL"
-            rule_name = parts[1]
-        elif len(parts) == 3:
-            state = parts[1]
-            rule_name = parts[2]
-        else:
-            continue
+        target_states, rule_name = _statetoken(name)
 
         if rule_name == "ignore":
             if isinstance(val, str):
-                engine.set_ignore(state, val)
+                for st in target_states:
+                    engine.set_ignore(st, val)
             continue
 
         if rule_name == "error":
@@ -230,13 +241,14 @@ def lex(
                     def err_handler(core_tok: CoreToken):
                         ptok = LexToken()
                         ptok.type = "error"
-                        ptok.value = core_tok.value
+                        ptok._TokenValueStorage__value = _DeferredTokenValue(core_tok)
                         ptok.lineno = core_tok.lineno
                         ptok.lexpos = core_tok.lexpos
                         ptok.lexer = ply_lexer
                         return fn(ptok)
                     return err_handler
-                engine.set_error_func(state, make_err_func(val))
+                for st in target_states:
+                    engine.set_error_func(st, make_err_func(val))
             continue
 
         if callable(val):
@@ -247,11 +259,12 @@ def lex(
                 line = 0
             doc = val.__doc__
             if doc:
-                pattern = doc.strip()
-                func_rules.append((state, rule_name, val, line))
+                for st in target_states:
+                    func_rules.append((st, rule_name, val, line))
         elif isinstance(val, str):
             # String regex rule
-            str_rules.append((state, rule_name, val))
+            for st in target_states:
+                str_rules.append((st, rule_name, val))
 
     # Sort function rules by line number
     func_rules.sort(key=lambda r: r[3])

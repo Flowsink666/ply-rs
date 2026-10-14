@@ -1,7 +1,8 @@
 use crate::lexer::PyToken;
 use crate::symbols::{EOF_SYMBOL, ERROR_SYMBOL};
+use pyo3::class::gc::{PyTraverseError, PyVisit};
 use pyo3::prelude::*;
-use pyo3::types::{PyAnyMethods, PyList, PyTuple};
+use pyo3::types::{PyAnyMethods, PyList, PyString, PyStringMethods, PyTuple};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -36,6 +37,20 @@ impl PyParsedSymbol {
 
 #[pymethods]
 impl PyParsedSymbol {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.value)
+    }
+
+    fn __clear__(slf: &Bound<'_, Self>) {
+        let previous = {
+            let Ok(mut symbol) = slf.try_borrow_mut() else {
+                return;
+            };
+            std::mem::replace(&mut symbol.value, slf.py().None())
+        };
+        drop(previous);
+    }
+
     #[new]
     #[pyo3(signature = (sym_type, value=None, lineno=1, endlineno=1, lexpos=0, endlexpos=0))]
     fn new(
@@ -78,8 +93,15 @@ impl PyParsedSymbol {
 }
 
 pub struct ParserTables {
-    pub action: Vec<HashMap<String, i32>>,
+    pub action: Vec<HashMap<String, Option<i32>>>,
     pub goto: Vec<HashMap<String, usize>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParserAction {
+    Missing,
+    Forbidden,
+    Action(i32),
 }
 
 /// A live stack view for proxy actions. Symbols are converted only on access,
@@ -91,6 +113,23 @@ struct ParserStack {
 
 #[pymethods]
 impl ParserStack {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for symbol in &self.symbols {
+            visit.call(&symbol.value)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(slf: &Bound<'_, Self>) {
+        let previous = {
+            let Ok(mut stack) = slf.try_borrow_mut() else {
+                return;
+            };
+            std::mem::take(&mut stack.symbols)
+        };
+        drop(previous);
+    }
+
     fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<PyParsedSymbol> {
         let len = self.symbols.len() as isize;
         let index = if index < 0 { len + index } else { index };
@@ -112,10 +151,7 @@ impl ParserTables {
         let mut action_vec = vec![HashMap::new(); num_states];
         for (state, row) in action {
             if state < num_states {
-                action_vec[state] = row
-                    .into_iter()
-                    .filter_map(|(symbol, value)| value.map(|value| (symbol, value)))
-                    .collect();
+                action_vec[state] = row;
             }
         }
         let mut goto_vec = vec![HashMap::new(); num_states];
@@ -127,6 +163,27 @@ impl ParserTables {
         Self {
             action: action_vec,
             goto: goto_vec,
+        }
+    }
+
+    fn lookup_action(&self, py: Python<'_>, state: usize, symbol: &PyParsedSymbol) -> ParserAction {
+        let Some(row) = self.action.get(state) else {
+            return ParserAction::Missing;
+        };
+        // A present None is a prohibition, so literal fallback is allowed only
+        // when the token type is absent. Recovery uses this same lookup.
+        let action = row.get(&symbol.sym_type).copied().or_else(|| {
+            if let Ok(py_str) = symbol.value.bind(py).cast::<PyString>() {
+                if let Ok(s) = py_str.to_str() {
+                    return row.get(s).copied();
+                }
+            }
+            None
+        });
+        match action {
+            Some(Some(action)) => ParserAction::Action(action),
+            Some(None) => ParserAction::Forbidden,
+            None => ParserAction::Missing,
         }
     }
 }
@@ -142,6 +199,10 @@ pub struct LRParserEngine {
 
 #[pymethods]
 impl LRParserEngine {
+    #[classattr]
+    #[pyo3(name = "supports_prepared_slice")]
+    const SUPPORTS_PREPARED_SLICE: bool = true;
+
     #[new]
     #[pyo3(signature = (num_states, action, goto, prod_names, prod_lens, has_custom_func, value_actions=None))]
     fn new(
@@ -201,7 +262,9 @@ impl LRParserEngine {
         }
     }
 
-    #[pyo3(signature = (token_stream, reduce_cb, error_cb=None, value_funcs=None, with_stack=false))]
+    #[pyo3(signature = (token_stream, reduce_cb, error_cb=None, value_funcs=None, with_stack=false, *, prepared_slice=false))]
+    // Keep the existing Python arguments and add only an optional internal mode.
+    #[allow(clippy::too_many_arguments)]
     fn parse(
         &self,
         py: Python<'_>,
@@ -210,6 +273,7 @@ impl LRParserEngine {
         error_cb: Option<&Bound<'_, PyAny>>,
         value_funcs: Option<&Bound<'_, PyList>>,
         with_stack: bool,
+        prepared_slice: bool,
     ) -> PyResult<Py<PyAny>> {
         let mut token_iter = token_stream.try_iter()?;
         let mut eof_reached = false;
@@ -241,25 +305,53 @@ impl LRParserEngine {
                             endlexpos: token.end,
                         });
                     }
-                    let sym_type = if let Ok(t) = item.getattr("type") {
-                        t.extract::<String>()?
-                    } else {
-                        item.str()?.to_string()
+                    let sym_type = match item.getattr("type") {
+                        Ok(t) => t.extract::<String>()?,
+                        Err(error)
+                            if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) =>
+                        {
+                            item.str()?.to_string()
+                        }
+                        Err(error) => return Err(error),
                     };
-                    let value = if let Ok(v) = item.getattr("value") {
-                        v.unbind()
-                    } else {
-                        item.clone().unbind()
+                    let value = match item.getattr("value") {
+                        Ok(v) => v.unbind(),
+                        Err(error)
+                            if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) =>
+                        {
+                            item.clone().unbind()
+                        }
+                        Err(error) => return Err(error),
                     };
-                    let lineno = item
-                        .getattr("lineno")
-                        .and_then(|l| l.extract::<usize>())
-                        .unwrap_or(1);
-                    let lexpos = item
-                        .getattr("lexpos")
-                        .or_else(|_| item.getattr("index"))
-                        .and_then(|p| p.extract::<usize>())
-                        .unwrap_or(0);
+                    let lineno = match item.getattr("lineno") {
+                        Ok(line) => line.extract::<usize>()?,
+                        Err(error)
+                            if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) =>
+                        {
+                            1
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    let lexpos = match item.getattr("lexpos") {
+                        Ok(position) => position.extract::<usize>()?,
+                        Err(error)
+                            if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) =>
+                        {
+                            match item.getattr("index") {
+                                Ok(index) => index.extract::<usize>()?,
+                                Err(error)
+                                    if error
+                                        .is_instance_of::<pyo3::exceptions::PyAttributeError>(
+                                            py,
+                                        ) =>
+                                {
+                                    0
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    };
                     let endpos = match item.getattr("end") {
                         Ok(end) => end.extract::<usize>()?,
                         Err(error)
@@ -308,30 +400,51 @@ impl LRParserEngine {
         )?;
         let mut lookahead = fetch_next_token()?;
         let mut error_count: usize = 0;
+        let mut recovery_lookahead: Option<PyParsedSymbol> = None;
 
         loop {
             let state = *statestack.last().unwrap();
-            let act = self.tables.action.get(state).and_then(|act_map| {
-                act_map.get(&lookahead.sym_type).copied().or_else(|| {
-                    // If not matched by type, try literal match by value string
-                    if let Ok(val_str) = lookahead.value.bind(py).extract::<String>() {
-                        act_map.get(&val_str).copied()
-                    } else {
-                        None
+            let act = if recovery_lookahead.is_some() {
+                // Internal error tokens never use literal fallback or accept.
+                match self
+                    .tables
+                    .action
+                    .get(state)
+                    .and_then(|row| row.get(ERROR_SYMBOL))
+                    .copied()
+                {
+                    Some(Some(0)) => ParserAction::Missing,
+                    Some(Some(action))
+                        if action < 0
+                            && action
+                                .checked_neg()
+                                .and_then(|number| self.prod_lens.get(number as usize))
+                                .is_none_or(|len| *len >= statestack.len()) =>
+                    {
+                        ParserAction::Missing
                     }
-                })
-            });
+                    Some(Some(action)) => ParserAction::Action(action),
+                    Some(None) => ParserAction::Forbidden,
+                    None => ParserAction::Missing,
+                }
+            } else {
+                self.tables.lookup_action(py, state, &lookahead)
+            };
 
             match act {
                 // Case 1: Shift (act > 0)
-                Some(shift_state) if shift_state > 0 => {
+                ParserAction::Action(shift_state) if shift_state > 0 => {
                     statestack.push(shift_state as usize);
                     symstack.borrow_mut(py).symbols.push(lookahead);
-                    lookahead = fetch_next_token()?;
-                    error_count = error_count.saturating_sub(1);
+                    if let Some(real_token) = recovery_lookahead.take() {
+                        lookahead = real_token;
+                    } else {
+                        lookahead = fetch_next_token()?;
+                        error_count = error_count.saturating_sub(1);
+                    }
                 }
                 // Case 2: Reduce (act < 0)
-                Some(reduce_rule) if reduce_rule < 0 => {
+                ParserAction::Action(reduce_rule) if reduce_rule < 0 => {
                     let p_num = (-reduce_rule) as usize;
                     let p_len = self.prod_lens[p_num];
                     let p_name = &self.prod_names[p_num];
@@ -359,13 +472,26 @@ impl LRParserEngine {
                             .first()
                             .map(|s| s.value.clone_ref(py))
                             .unwrap_or_else(|| py.None());
-                        let args = PyTuple::new(py, popped_syms.into_iter().map(|s| s.value))?;
                         let functions = value_funcs.ok_or_else(|| {
                             pyo3::exceptions::PyValueError::new_err(
                                 "value_funcs required for value actions",
                             )
                         })?;
-                        let res = functions.get_item(p_num)?.call(args, None)?;
+                        let function = functions.get_item(p_num)?;
+                        let mut values = popped_syms.into_iter().map(|s| s.value);
+                        let res = match p_len {
+                            0 => function.call0()?,
+                            1 => function.call1((values.next().unwrap(),))?,
+                            2 => {
+                                function.call1((values.next().unwrap(), values.next().unwrap()))?
+                            }
+                            3 => function.call1((
+                                values.next().unwrap(),
+                                values.next().unwrap(),
+                                values.next().unwrap(),
+                            ))?,
+                            _ => function.call(PyTuple::new(py, values)?, None)?,
+                        };
                         lhs_sym.value = if res.is_none() {
                             default_value
                         } else {
@@ -378,21 +504,42 @@ impl LRParserEngine {
                             .first()
                             .map(|s| s.value.clone_ref(py))
                             .unwrap_or_else(|| py.None());
-                        let py_popped = PyList::new(
-                            py,
-                            popped_syms
-                                .into_iter()
-                                .map(|s| Py::new(py, s))
-                                .collect::<PyResult<Vec<_>>>()?,
-                        )?;
-                        let py_lhs = Py::new(py, lhs_sym.clone_symbol(py))?;
-                        let res = if with_stack {
+                        let mut items =
+                            Vec::with_capacity(popped_syms.len() + usize::from(prepared_slice));
+                        // Detach the RHS before creating Python objects: GC and
+                        // callbacks must never run while the stack is borrowed.
+                        for symbol in popped_syms {
+                            items.push(Py::new(py, symbol)?);
+                        }
+                        // Keep an independent RHS list even in prepared mode.
+                        // Actions may delete or replace slice entries; the RHS
+                        // must retain its original lifetime, also in tracebacks.
+                        let py_popped = PyList::new(py, &items)?;
+                        // The old native LHS kept its default value alive until
+                        // the callback returned. Retain that lifetime without
+                        // cloning the symbol's String and position fields.
+                        let previous_lhs_value = lhs_sym.value.clone_ref(py);
+                        let py_lhs = Py::new(py, lhs_sym)?;
+                        let res = if prepared_slice {
+                            items.insert(0, py_lhs.clone_ref(py));
+                            let py_slice = PyList::new(py, items)?;
+                            if with_stack {
+                                reduce_cb.call1((p_num, &py_lhs, py_popped, &symstack, py_slice))?
+                            } else {
+                                reduce_cb.call1((p_num, &py_lhs, py_popped, py_slice))?
+                            }
+                        } else if with_stack {
+                            drop(items);
                             reduce_cb.call1((p_num, &py_lhs, py_popped, &symstack))?
                         } else {
+                            drop(items);
                             reduce_cb.call1((p_num, &py_lhs, py_popped))?
                         };
                         // Preserve position edits performed through the action proxy.
                         lhs_sym = py_lhs.borrow(py).clone_symbol(py);
+                        // Drop references only after releasing the symbol borrow:
+                        // a finalizer may inspect the saved proxy's committed LHS.
+                        drop(previous_lhs_value);
                         lhs_sym.value = res.unbind();
                     } else {
                         lhs_sym.value = popped_syms
@@ -420,7 +567,7 @@ impl LRParserEngine {
                     symstack.borrow_mut(py).symbols.push(lhs_sym);
                 }
                 // Case 3: Accept (act == 0)
-                Some(0) => {
+                ParserAction::Action(0) => {
                     return Ok(symstack
                         .borrow(py)
                         .symbols
@@ -431,6 +578,27 @@ impl LRParserEngine {
                 }
                 // Case 4: Syntax error / Error recovery
                 _ => {
+                    if recovery_lookahead.is_some() {
+                        // Reduce completed statements on the synthetic error
+                        // before popping states that cannot act on it.
+                        if statestack.len() > 1 {
+                            statestack.pop();
+                            let discarded = symstack.borrow_mut(py).symbols.pop();
+                            // Dropping a value may run a Python finalizer.
+                            // Release the stack borrow before that can happen.
+                            drop(discarded);
+                            continue;
+                        }
+                        lookahead = recovery_lookahead.take().unwrap();
+                        return Err(pyo3::exceptions::PySyntaxError::new_err(format!(
+                            "Syntax error at {:?} (type {:?}) on line {}, pos {}",
+                            lookahead.value.bind(py),
+                            lookahead.sym_type,
+                            lookahead.lineno,
+                            lookahead.lexpos
+                        )));
+                    }
+
                     if error_count == 0 {
                         if let Some(err_fn) = error_cb {
                             let py_lookahead = Py::new(py, lookahead.clone_symbol(py))?;
@@ -439,7 +607,15 @@ impl LRParserEngine {
                                 return Ok(res.unbind());
                             }
                         }
-                    } else {
+                    }
+
+                    let error_on_stack = symstack
+                        .borrow(py)
+                        .symbols
+                        .last()
+                        .is_some_and(|symbol| symbol.sym_type == ERROR_SYMBOL);
+                    if error_on_stack {
+                        // Discard input only while waiting for synchronization.
                         if lookahead.sym_type == EOF_SYMBOL {
                             return Err(pyo3::exceptions::PySyntaxError::new_err(format!(
                                 "Syntax error at EOF on line {}, pos {}",
@@ -450,98 +626,13 @@ impl LRParserEngine {
                         continue;
                     }
 
-                    // Search statestack backwards for state that has ERROR_SYMBOL shift
-                    let mut error_state_idx: Option<usize> = None;
-                    for (idx, &st) in statestack.iter().enumerate().rev() {
-                        if let Some(act_map) = self.tables.action.get(st) {
-                            if act_map.contains_key(ERROR_SYMBOL) {
-                                error_state_idx = Some(idx);
-                                break;
-                            }
-                        }
-                    }
-
-                    if let Some(err_idx) = error_state_idx {
-                        let pop_count = (statestack.len() - 1) - err_idx;
-                        if pop_count > 0 {
-                            statestack.truncate(statestack.len() - pop_count);
-                            let mut stack = symstack.borrow_mut(py);
-                            let new_len = stack.symbols.len() - pop_count;
-                            stack.symbols.truncate(new_len);
-                        }
-
-                        let top_st = *statestack.last().unwrap();
-                        let err_shift = self
-                            .tables
-                            .action
-                            .get(top_st)
-                            .and_then(|m| m.get(ERROR_SYMBOL))
-                            .copied();
-                        if let Some(shift_st) = err_shift {
-                            if shift_st > 0 {
-                                statestack.push(shift_st as usize);
-                                symstack.borrow_mut(py).symbols.push(PyParsedSymbol {
-                                    sym_type: ERROR_SYMBOL.to_string(),
-                                    value: lookahead.value.clone_ref(py),
-                                    lineno: lookahead.lineno,
-                                    endlineno: lookahead.endlineno,
-                                    lexpos: lookahead.lexpos,
-                                    endlexpos: lookahead.endlexpos,
-                                });
-                                error_count = 3;
-
-                                let mut recovered = false;
-                                while lookahead.sym_type != EOF_SYMBOL {
-                                    let curr_st = *statestack.last().unwrap();
-                                    if let Some(act_map) = self.tables.action.get(curr_st) {
-                                        if act_map.contains_key(&lookahead.sym_type) {
-                                            recovered = true;
-                                            break;
-                                        }
-                                        if let Ok(val_str) =
-                                            lookahead.value.bind(py).extract::<String>()
-                                        {
-                                            if act_map.contains_key(&val_str) {
-                                                recovered = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    lookahead = fetch_next_token()?;
-                                }
-
-                                if !recovered {
-                                    let curr_st = *statestack.last().unwrap();
-                                    let has_act = self
-                                        .tables
-                                        .action
-                                        .get(curr_st)
-                                        .map(|m| m.contains_key(&lookahead.sym_type))
-                                        .unwrap_or(false);
-                                    if !has_act {
-                                        return Err(pyo3::exceptions::PySyntaxError::new_err(
-                                            format!(
-                                            "Syntax error at {:?} (type {:?}) on line {}, pos {}",
-                                            lookahead.value.bind(py),
-                                            lookahead.sym_type,
-                                            lookahead.lineno,
-                                            lookahead.lexpos
-                                        ),
-                                        ));
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-                    }
-
-                    return Err(pyo3::exceptions::PySyntaxError::new_err(format!(
-                        "Syntax error at {:?} (type {:?}) on line {}, pos {}",
-                        lookahead.value.bind(py),
-                        lookahead.sym_type,
-                        lookahead.lineno,
-                        lookahead.lexpos
-                    )));
+                    // The counter suppresses callbacks, not new recoveries.
+                    // Re-enter the LR loop so reductions on 'error' run first.
+                    let mut error_symbol = lookahead.clone_symbol(py);
+                    error_symbol.sym_type = ERROR_SYMBOL.to_string();
+                    recovery_lookahead = Some(lookahead);
+                    lookahead = error_symbol;
+                    error_count = 3;
                 }
             }
         }

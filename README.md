@@ -64,6 +64,15 @@ checks the signature once: a callback accepting one argument gets the proxy;
 otherwise a compatible RHS-argument signature gets the values. Action exceptions
 propagate without retrying the callback.
 
+For a grammar that will stay unchanged, call `parser.freeze()` on a modern
+`Parser` or a core `LRParser`. Core construction also accepts
+`LRParser(table, frozen=True)`. This compiles a detached snapshot of the tables
+and production bindings. Subsequent source edits do not affect that parser;
+its ACTION/GOTO views and runtime production fields reject edits. Callback instance
+state, error handlers, and per-call lexer/parser context remain live. The
+default mode continues to observe edits between parses. Frozen native parsers
+reuse their compiled engine without comparing the entire grammar each call.
+
 To use compatibility APIs, replace the corresponding imports:
 
 ```python
@@ -106,6 +115,7 @@ expose `.backend` to show their actual selection.
 
 - [Architecture and backend policy](docs/architecture.md)
 - [Environment setup, builds, and test commands](docs/development.md)
+- [Runtime contracts and change validation](tests/CONTRACTS.md)
 - [Benchmark scenarios and commands](benchmarks/README.md)
 - [Pinned upstream reference clones](upstream/README.md)
 - [Background research](docs/research/PLY%20-%20SLY%20现代化继任项目调查报告.md)

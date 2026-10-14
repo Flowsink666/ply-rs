@@ -6,13 +6,18 @@ Drop-in replacement for `from sly import Lexer`.
 import inspect
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
 from rply.core.lexer_engine import LexerEngine, Token as CoreToken, LexError
+from rply.compat._tokens import (
+    _DeferredTokenValue, _TokenValueStorage, _public_token_state, _value_property,
+)
 from rply.compat.sly.decorators import _decorator
 
 
-class Token:
+class Token(_TokenValueStorage):
     """Representation of a SLY token."""
 
-    __slots__ = ("type", "value", "lineno", "index", "end")
+    __slots__ = ("type", "lineno", "index", "end")
+
+    value = _value_property
 
     def __init__(self, tok_type: str = "", value: Any = None, lineno: int = 1, index: int = 0, end: int = 0):
         self.type = tok_type
@@ -28,6 +33,9 @@ class Token:
         if isinstance(other, Token):
             return self.type == other.type and self.value == other.value
         return False
+
+    def __getstate__(self):
+        return _public_token_state(self, ("type", "value", "lineno", "index", "end"))
 
 
 class TokenStr(str):
@@ -177,7 +185,7 @@ class Lexer(metaclass=LexerMeta):
         error_handler = getattr(self, "error", None)
         if callable(error_handler):
             def wrap_err(tok: CoreToken):
-                sly_tok = Token(tok.type, tok.value, tok.lineno, tok.lexpos, tok.end)
+                sly_tok = Token(tok.type, _DeferredTokenValue(tok), tok.lineno, tok.lexpos, tok.end)
                 old_index = sly_tok.index
                 res = error_handler(sly_tok)
                 if sly_tok.index != old_index:
@@ -225,10 +233,13 @@ class Lexer(metaclass=LexerMeta):
             core_tok = self._engine.token()
             if core_tok is None:
                 break
+            # A returned error token already uses SLY's public index field and
+            # may still hold a deferred suffix for the consumer to inspect.
+            is_sly_token = type(core_tok) is Token
             yield Token(
                 tok_type=core_tok.type,
-                value=core_tok.value,
+                value=core_tok._TokenValueStorage__value if is_sly_token else core_tok.value,
                 lineno=core_tok.lineno,
-                index=core_tok.lexpos,
+                index=core_tok.index if is_sly_token else core_tok.lexpos,
                 end=core_tok.end,
             )

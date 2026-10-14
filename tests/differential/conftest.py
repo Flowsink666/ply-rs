@@ -1,6 +1,7 @@
 """Load reference clones under private names without modifying sys.path."""
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +16,8 @@ def load_reference(name):
         return sys.modules[alias]
     package = ROOT / "upstream" / name / "src" / name / "__init__.py"
     if not package.is_file():
+        if os.environ.get("RPLY_STRICT_TESTS", "").lower() in {"1", "true", "yes"}:
+            pytest.fail(f"Missing required upstream/{name} reference clone; see upstream/README.md")
         pytest.skip(f"Missing upstream/{name} reference clone; see upstream/README.md")
     spec = importlib.util.spec_from_file_location(alias, package)
     module = importlib.util.module_from_spec(spec)
