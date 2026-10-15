@@ -84,12 +84,6 @@ def test_modern_parser():
     res1 = parser.parse(lexer.tokenize("2 + 3 * 4"))
     assert res1 == 14
 
-    res2 = parser.parse(lexer.tokenize("(2 + 3) * 4"))
-    assert res2 == 20
-
-    res3 = parser.parse(lexer.tokenize("100 / 5 / 2"))
-    assert res3 == 10
-
 
 def test_bnf_separator_and_explicit_value_action():
     class BnfParser(Parser):

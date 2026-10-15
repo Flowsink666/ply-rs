@@ -1,3 +1,9 @@
+"""Modern wrappers forward lexer state, freezing, and action ownership."""
+
+from types import SimpleNamespace
+
+import pytest
+
 from ply_rs import Lexer, Parser, Token, token, rule
 
 
@@ -59,3 +65,28 @@ def test_modern_frozen_class_default_and_explicit_override():
     parser.table.action[0]["N"] = None
     assert parser.parse([Token("N", 7)]) == 7
     assert editable.freeze().frozen
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_modern_actions_receive_public_owner_and_independent_recursive_context(frozen):
+    class OwnerParser(Parser):
+        tokens = {"N"}
+
+        @rule("s : N")
+        def value(self, p):
+            assert p.parser is self
+            if p[1] == 2:
+                inner = self.parse([Token("N", 1)], lexer=SimpleNamespace(name="inner"))
+                return p.lexer.name, inner, self.increment
+            return p.lexer.name, self.increment
+
+    parser = OwnerParser()
+    parser.increment = 10
+    if frozen:
+        assert parser.freeze() is parser
+    assert parser.frozen is frozen
+    assert parser.parse([Token("N", 2)], lexer=SimpleNamespace(name="outer")) == (
+        "outer", ("inner", 10), 10,
+    )
+    parser.increment = 20
+    assert parser.parse([Token("N", 1)], lexer=SimpleNamespace(name="changed")) == ("changed", 20)

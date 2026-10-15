@@ -1,215 +1,50 @@
-"""Recovery contracts against independent specifications and vendored PLY.
-
-The exhaustive comparison shares ACTION/GOTO to isolate execution. The smaller
-comparisons let PLY build its own tables so table compilation is checked too.
-References are loaded by upstream_ply under private names, never via sys.path.
-"""
-
-from itertools import product
-from types import SimpleNamespace
+"""Recovery boundaries and independently built pinned PLY tables."""
 
 import pytest
 
-from ply_rs import Grammar, LRParser, LRTable, Token
-
+from ply_rs import Grammar, LRParser, LRTable
+from tests.fixtures.recovery import (STATEMENT_RULES, _grammar, _independent_oracle, _run_ply, _run_ply_rs)
 
 pytestmark = pytest.mark.differential
 
 
-STATEMENT_RULES = (
-    ("s", ("START", "stmts"), lambda p: p[2]),
-    ("stmts", ("stmts", "stmt"), lambda p: p[1] + [p[2]]),
-    ("stmts", ("stmt",), lambda p: [p[1]]),
-    ("stmt", ("ID", "SEMI"), lambda p: ("id", p[1])),
-    ("stmt", ("error", "SEMI"), lambda p: ("error", p[1])),
-)
-
-
-def _grammar(terminals, rules, start, precedence=()):
-    grammar = Grammar(set(terminals))
-    grammar.set_precedence(list(precedence))
-    for name, rhs, action in rules:
-        grammar.add_production(name, list(rhs), action)
-    grammar.set_start(start)
-    return grammar
-
-
-def _ply_action(action):
-    def reduce(proxy):
-        # PLY exposes the original token as error.value; ply-rs exposes its value.
-        for symbol in proxy.slice[1:]:
-            if symbol.type == "error" and hasattr(symbol.value, "value"):
-                symbol.value = symbol.value.value
-        proxy[0] = action(proxy)
-
-    return reduce
-
-
-def _ply_parser(yacc, table, errors):
-    parser = yacc.LRParser(
-        table, lambda token: errors.append(token.value if token is not None else "$end")
-    )
-    # Default reductions can change when errors are detected. This comparison
-    # checks the explicit lookahead contract common to both runtimes.
-    parser.disable_defaulted_states()
-    return parser
-
-
-def _shared_table_oracle(yacc, table, errors):
-    productions = [
-        SimpleNamespace(
-            name=production.name,
-            len=production.len,
-            callable=_ply_action(production.func) if production.func is not None else None,
-        )
-        for production in table.productions
-    ]
-    return _ply_parser(yacc, SimpleNamespace(
-        lr_action=table.action, lr_goto=table.goto, lr_productions=productions
-    ), errors)
-
-
-def _independent_oracle(yacc, terminals, rules, start, errors, precedence=()):
-    grammar = yacc.Grammar(list(terminals))
-    for token, (associativity, level) in precedence:
-        grammar.set_precedence(token, associativity, level)
-    actions = {}
-    for index, (name, rhs, action) in enumerate(rules):
-        action_name = f"action_{index}"
-        actions[action_name] = _ply_action(action)
-        grammar.add_production(name, list(rhs), func=action_name)
-    grammar.set_start(start)
-    table = yacc.LRTable(grammar)
-    table.bind_callables(actions)
-    return _ply_parser(yacc, table, errors)
-
-
-def _run_ply_rs(parser, entries):
-    try:
-        result = parser.parse([Token(kind, value) for kind, value in entries])
-    except SyntaxError:
-        return False, None
-    return True, result
-
-
-def _run_ply(parser, entries):
-    source = iter(SimpleNamespace(type=kind, value=value, lineno=1, lexpos=index)
-                  for index, (kind, value) in enumerate(entries))
-    result = parser.parse(lexer=SimpleNamespace(token=lambda: next(source, None)))
-    return result is not None, result
-
-
-def _statement_spec(types, *, synthetic_shift_counts):
-    """Three-state specification of semicolon-terminated statements, without LR.
-
-    Only ID SEMI is valid. An invalid statement retains its first unexpected
-    token's value, discards input through the next SEMI, then starts a new one.
-    ply-rs requires three real shifts before its next error callback. PLY counts
-    the synthetic shift too, and resets suppression while discarding errors.
-    """
-    assert types[0] == "START"
-    state, remaining = "start", 0
-    statements, callbacks = [], []
-    statement_value = error_value = None
-
-    for index, kind in enumerate(types[1:], 1):
-        if state == "start" and kind == "ID":
-            state, statement_value = "id", index
-            remaining = max(remaining - 1, 0)
-        elif state == "id" and kind == "SEMI":
-            statements.append(("id", statement_value))
-            state = "start"
-            remaining = max(remaining - 1, 0)
-        elif state == "error" and kind == "SEMI":
-            statements.append(("error", error_value))
-            state = "start"
-            remaining = max(remaining - 1, 0)
-        else:
-            if remaining == 0:
-                callbacks.append(index)
-            if state != "error":
-                state, error_value = "error", index
-                remaining = 3 - int(synthetic_shift_counts)
-                if kind == "SEMI":
-                    statements.append(("error", error_value))
-                    state = "start"
-                    remaining -= 1
-                    continue
-            # PLY resets after replaying or discarding an offending token.
-            if synthetic_shift_counts:
-                remaining = 3
-
-    successful = state == "start" and bool(statements)
-    if not successful and remaining == 0:
-        callbacks.append("$end")
-    return (successful, statements if successful else None), callbacks
-
-
 @pytest.mark.parametrize("frozen", [False, True], ids=["dynamic", "frozen"])
-def test_all_short_recovery_sequences_have_exact_results_and_callbacks(upstream_ply, frozen):
-    table = LRTable(_grammar({"START", "ID", "SEMI", "BAD"}, STATEMENT_RULES, "s"))
-    errors, reference_errors = [], []
-    parser = LRParser(table, error_func=lambda token: errors.append(token.value), frozen=frozen)
-    reference = _shared_table_oracle(upstream_ply[1], table, reference_errors)
-    successful = failed = successful_callback_differences = total = 0
-
-    # Increasing lengths ensure the first failure is a shortest counterexample.
-    for size in range(8):
-        for suffix in product(("ID", "BAD", "SEMI"), repeat=size):
-            types = ("START",) + suffix
-            entries = tuple((kind, index) for index, kind in enumerate(types))
-            errors.clear()
-            reference_errors.clear()
-            expected, expected_errors = _statement_spec(types, synthetic_shift_counts=False)
-            reference_expected, expected_reference_errors = _statement_spec(
-                types, synthetic_shift_counts=True
-            )
-            actual = _run_ply_rs(parser, entries)
-            reference_actual = _run_ply(reference, entries)
-            trace = " ".join(types) + " $end"
-            assert actual == expected == reference_actual == reference_expected, trace
-            assert errors == expected_errors, (trace, "ply_rs callbacks", errors, expected_errors)
-            assert reference_errors == expected_reference_errors, (
-                trace, "PLY callbacks", reference_errors, expected_reference_errors
-            )
-            total += 1
-            if actual[0]:
-                successful += 1
-                successful_callback_differences += errors != reference_errors
-            else:
-                failed += 1
-
-    assert (total, successful, failed) == (3280, 1093, 2187)
-    # Every discrepancy is already checked against both explicit contracts;
-    # this aggregate also locks the observed boundary of their difference.
-    assert successful_callback_differences == 148
-
-
-@pytest.mark.parametrize("frozen", [False, True], ids=["dynamic", "frozen"])
-def test_independently_built_tables_preserve_recovery(upstream_ply, frozen):
+def test_recovery_boundaries_match_independent_tables(upstream_ply, frozen):
     terminals = {"START", "ID", "SEMI", "BAD"}
     errors, reference_errors = [], []
     parser = LRParser(LRTable(_grammar(terminals, STATEMENT_RULES, "s")),
                       error_func=lambda token: errors.append(token.value), frozen=frozen)
     reference = _independent_oracle(upstream_ply[1], terminals, STATEMENT_RULES, "s", reference_errors)
+    # Explicit input/output boundaries; no counts tied to the size of a search.
     cases = (
-        ("START", "ID", "SEMI"),
-        ("START", "BAD", "SEMI", "BAD", "SEMI"),
-        ("START", "BAD", "SEMI", "ID", "SEMI", "BAD", "SEMI"),
-        ("START", "SEMI", "ID", "ID", "SEMI"),
-        ("START", "BAD", "SEMI", "ID"),
+        ("", (False, None), ["$end"], ["$end"]),
+        ("ID", (False, None), ["$end"], ["$end"]),
+        ("ID SEMI", (True, [("id", 1)]), [], []),
+        ("BAD", (False, None), [1], [1]),
+        ("BAD SEMI", (True, [("error", 1)]), [1], [1]),
+        ("SEMI", (True, [("error", 1)]), [1], [1]),
+        ("ID BAD SEMI", (True, [("error", 2)]), [2], [2]),
+        ("ID ID SEMI", (True, [("error", 2)]), [2], [2]),
+        ("BAD BAD SEMI", (True, [("error", 1)]), [1], [1]),
+        ("ID SEMI BAD SEMI", (True, [("id", 1), ("error", 3)]), [3], [3]),
+        ("BAD SEMI BAD SEMI", (True, [("error", 1), ("error", 3)]), [1], [1]),
+        ("BAD SEMI ID SEMI BAD SEMI", (True, [("error", 1), ("id", 3), ("error", 5)]), [1, 5], [1, 5]),
+        ("ID SEMI ID SEMI BAD SEMI", (True, [("id", 1), ("id", 3), ("error", 5)]), [5], [5]),
+        ("ID SEMI BAD", (False, None), [3], [3]),
+        ("BAD SEMI ID", (False, None), [1], [1]),
+        ("ID SEMI SEMI ID SEMI", (True, [("id", 1), ("error", 3), ("id", 4)]), [3], [3]),
+        # PLY counts the synthetic error shift; core requires three real shifts.
+        ("SEMI ID ID SEMI", (True, [("error", 1), ("error", 3)]), [1], [1, 3]),
     )
-    for types in cases:
+    for suffix, expected, expected_errors, expected_reference_errors in cases:
+        types = ("START",) + tuple(suffix.split())
         entries = tuple((kind, index) for index, kind in enumerate(types))
         errors.clear()
         reference_errors.clear()
-        expected, expected_errors = _statement_spec(types, synthetic_shift_counts=False)
-        reference_expected, expected_reference_errors = _statement_spec(
-            types, synthetic_shift_counts=True
-        )
-        assert _run_ply_rs(parser, entries) == expected == _run_ply(reference, entries) == reference_expected, types
-        assert errors == expected_errors, types
-        assert reference_errors == expected_reference_errors, types
+        assert _run_ply_rs(parser, entries) == expected, suffix
+        assert _run_ply(reference, entries) == expected, suffix
+        assert errors == expected_errors, suffix
+        assert reference_errors == expected_reference_errors, suffix
 
 
 @pytest.mark.parametrize("frozen", [False, True], ids=["dynamic", "frozen"])

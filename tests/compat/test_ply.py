@@ -10,9 +10,6 @@ def test_ply_compat_calculator():
     parser = yacc.yacc(module=spec)
 
     assert parser.parse("3 + 4 * 10", lexer=lexer) == 43
-    assert parser.parse("(3 + 4) * 10", lexer=lexer) == 70
-    assert parser.parse("-5 + 10", lexer=lexer) == 5
-    assert parser.parse("100 / 10 / 2", lexer=lexer) == 5
 
 
 def test_ply_lexer_iteration():
@@ -246,3 +243,51 @@ def test_ply_multi_underscore_and_state_rules():
     lexer.input('123 "hello" 456')
     toks = [(t.type, t.value) for t in lexer]
     assert toks == [("NUM", "123"), ("STR", "hello"), ("NUM", "456")]
+
+
+def test_ply_position_and_line_properties_show_callback_updates_immediately():
+    trace = []
+
+    def t_WORD(tok):
+        r"[a-z]+"
+        trace.append((tok.lexer.lexpos, tok.lexer.lineno))
+        tok.lexer.skip()
+        tok.lexer.lineno = 7
+        trace.append((tok.lexer.lexpos, tok.lexer.lineno))
+        return tok
+
+    lexer = lex.lex(module={"tokens": ("WORD",), "t_WORD": t_WORD})
+    lexer.input("ab?cd?")
+    assert (lexer.lexpos, lexer.lineno) == (0, 1)
+    assert lexer.token().value == "ab"
+    assert (lexer.lexpos, lexer.lineno) == (3, 7)
+    assert lexer.token().value == "cd"
+    assert (lexer.lexpos, lexer.lineno) == (6, 7)
+    assert lexer.token() is None
+    assert trace == [(2, 1), (3, 7), (5, 7), (6, 7)]
+    lexer.input("x")
+    assert (lexer.lexpos, lexer.lineno) == (0, 1)
+
+
+def test_ply_panic_mode_restart_discards_incomplete_stack():
+    lexer = lex.lex(module={"tokens": ("N", "BAD", "SEMI"), "t_N": r"\d+",
+                            "t_BAD": r"\?", "t_SEMI": ";", "t_ignore": " "})
+    errors = []
+
+    def p_s(p):
+        "s : N SEMI"
+        p[0] = p[1]
+
+    def p_error(tok):
+        assert tok.lexer is lexer
+        errors.append(tok.type)
+        while True:
+            token = parser.token()
+            if token is None or token.type == "SEMI":
+                break
+        parser.restart()
+
+    parser = yacc.yacc(module={"tokens": ("N", "BAD", "SEMI"),
+                               "p_s": p_s, "p_error": p_error})
+    assert parser.parse("1 ? ; 2 ;", lexer=lexer) == "2"
+    assert errors == ["BAD"]

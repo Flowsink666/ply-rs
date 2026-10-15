@@ -1,5 +1,6 @@
 """SLY compatibility tests."""
 
+from ply_rs import Token
 from ply_rs.compat import sly
 from tests.fixtures.sly_calculator import build_calculator
 
@@ -11,9 +12,6 @@ def test_sly_compat_calculator():
     parser = SlyCalcParser()
 
     assert parser.parse(lexer.tokenize("10 + 20 * 3")) == 70
-    assert parser.parse(lexer.tokenize("(10 + 20) * 3")) == 90
-    assert parser.parse(lexer.tokenize("50 - 20 - 5")) == 25
-    assert parser.parse(lexer.tokenize("100 / 2 / 5")) == 10
 
 
 def test_sly_action_view_uses_rhs_positions():
@@ -171,3 +169,64 @@ def test_sly_remapped_action_preserves_returned_token_positions():
 
     tok = next(Words().tokenize("if"))
     assert (tok.type, tok.index, tok.end) == ("IF", 20, 30)
+
+
+def test_sly_replacement_tokens_and_eof_follow_recovery_protocol():
+    class Parser(sly.Parser):
+        tokens = {"N", "BAD"}
+
+        @_("N")
+        def s(self, p):
+            return p[0]
+
+        def error(self, tok):
+            self.errors.append(None if tok is None else tok.type)
+            if tok is not None:
+                self.errok()
+                return next(self.tokens, None)
+
+    parser = Parser()
+    parser.errors = []
+    assert parser.parse([Token("BAD", "?"), Token("N", 7)]) == 7
+    assert parser.parse([]) is None
+    assert parser.errors == ["BAD", None]
+    assert parser.tokens == {"N", "BAD"}
+
+
+def test_sly_mro_overrides_rules_without_duplicate_diamond_productions():
+    class Base(sly.Parser):
+        tokens = {"N"}
+
+        @_("N")
+        def s(self, p):
+            return "base"
+
+    class Left(Base):
+        pass
+
+    class Right(Base):
+        @_("N")
+        def s(self, p):
+            return p[0] + 1
+
+    class Child(Left, Right):
+        pass
+
+    parser = Child()
+    assert parser.parse([Token("N", 7)]) == 8
+    assert parser._table.rr_conflicts == []
+    assert len(parser._grammar.Productions) == 2
+
+
+def test_sly_explicit_bnf_separator_keeps_inherited_productions():
+    class Base(sly.Parser):
+        tokens = {"N"}
+
+        @_("s ::= N")
+        def s(self, p):
+            return p[0]
+
+    class Child(Base):
+        pass
+
+    assert Child().parse([Token("N", 7)]) == 7

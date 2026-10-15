@@ -28,6 +28,11 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/Flowsink666/rply"
+Repository = "https://github.com/Flowsink666/rply"
+Issues = "https://github.com/Flowsink666/rply/issues"
+
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
 
@@ -44,7 +49,7 @@ include = [
 exclude = ["**/__pycache__/**", "**/*.pyc", "upstream/ply/**", "upstream/sly/**"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/core", "tests/modern", "tests/compat", "tests/differential"]
 pythonpath = ["src"]
 markers = ["differential: compares compatibility APIs against optional upstream clones"]
 addopts = "--strict-markers"
